@@ -1,0 +1,60 @@
+# Guest functions replaced by localized copies (tools/localize_native.py), regenerated into app/generated/hot/ by
+# tools/codegen.ps1 and by the build after every codegen, so each copy matches the code it is built with. One per line:
+# <address> <what>
+#
+# Batch 1 (2026-10-06): the hottest functions of the PC profile of 3 minutes of gameplay (out/route2_script.txt: menus,
+# the first level with aiming, shots, a lost level and a retry), busy samples only, not hooked otherwise.
+# Main thread (share of its busy samples):
+823F5DF0 game code (4.1 % of the main thread)
+823F8380 game code (3.6 %)
+82151898 game code, leaf (3.3 %)
+823F6360 game code (3.3 %)
+824ACB08 game code (3.1 %)
+823E8D58 game code (2.8 %)
+823EACB8 game code (1.9 %)
+823EA2A0 game code (1.8 %)
+823F7660 game code (1.7 %)
+824A9E68 game code (1.3 %)
+823E9B98 game code (1.3 %)
+8214FC30 game code (1.2 %)
+821443E8 game code (1.2 %)
+8214F248 game code (1.1 %)
+82395590 game code (0.9 %)
+824CDE08 game code (0.9 %)
+82381988 game code (0.9 %)
+824A65A0 game code (0.7 %)
+824CF740 game code (0.7 %)
+823702C0 game code (0.6 %)
+# Wwise's audio thread (AK::EventManager; share of its busy samples):
+825BE6A0 Wwise mixing, leaf (17.7 % of the audio thread)
+825BD0F8 Wwise mixing, leaf (6.7 %)
+825BCB88 Wwise (3.5 %)
+825BEED8 Wwise (2.6 %)
+8251A320 Wwise (2.4 %)
+8258E5E8 Wwise (2.0 %)
+82587C68 Wwise (1.7 %)
+8258E2C0 Wwise (1.7 %)
+825BF360 Wwise (1.6 %)
+8251EE08 Wwise (1.6 %)
+8251B120 Wwise (1.5 %)
+825B6D38 Wwise (1.5 %)
+#
+# Batch 2 (2026-10-06): the next functions of the PC gameplay profile with batch 1 on (out/pc/logs/
+# pc_profile_natives_on.log, windows 3-6), every one at 0.4 % or more of its thread's busy samples, not hooked otherwise.
+# Main thread:
+8237F688 game code (0.9 % of the main thread with batch 1 on)
+82396150 game code (0.8 %)
+82396F28 game code (0.7 %)
+82399DC0 game code (0.5 %)
+823F5818 game code (0.4 %)
+824AA4C0 game code (0.4 %)
+# Wwise's audio thread:
+8251F1B8 Wwise (1.3 % of the audio thread with batch 1 on)
+8258D408 Wwise (1.0 %)
+825B2DA0 Wwise (0.8 %)
+8251D108 Wwise (0.8 %)
+8251BDE8 Wwise (0.7 %)
+825BCC68 Wwise (0.6 %)
+82591E00 Wwise (0.5 %)
+825BF458 Wwise (0.5 %)
+825BA158 Wwise (0.4 %)

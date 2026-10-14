@@ -1,0 +1,109 @@
+# Peggle 2-specific analysis corrections for the code generator.
+#
+# Every entry needs its evidence (which tool or which log found it). The tools that produce candidates:
+#   tools/find_gaps.py, tools/gap_fixpoint.py   code the automatic discovery left without a function
+#   tools/pointer_fixpoint.py                   code pointers stored in data (vtables, callback tables, CRT tables)
+#   tools/switch_check.py                       jump tables the generator bounded wrongly
+#   tools/runtime_gap_resolver.py               "Call to invalid or unregistered function" from a game log
+
+# The CRT's setjmp/longjmp (root keys: they must stay outside any table). Found by shape before the first boot
+# (2026-10-05, a scan of the image dump for runs of stores into r3 and the mirrored loads; tools/ppc_dis.py):
+#   setjmp  0x825F7760: (a hook pointer at 0x82D990E0 is tried first: bnectr), then stfd f14-f31, std r13-r31,
+#           128 VMX registers, cr at +304, lr at +308, r1 at +144, 0 at +312; returns 0
+#   longjmp 0x825F7C30: the mirror image (r7 = r3): unwinds to the registration at +308/+144, lfd f14-f31,
+#           ld r13-r31, VMX, mtlr/mtcrf, r1 from +144, returns r4 (1 if r4 was 0)
+# 32 call sites; the image carries libpng (its error path longjmps back to png_jmpbuf), so recompiled as plain calls
+# a PNG decode error would return to its caller with a foreign stack frame. With the addresses the generator emits
+# host setjmp/longjmp keyed by the guest jmp_buf.
+setjmp_address = 0x825F7760
+longjmp_address = 0x825F7C30
+
+[functions]
+# First codegen (2026-10-05): "target not in any function". 0x823320D8 is a one-instruction function,
+# `b 0x82331500` (0x82331500 = interlocked decrement of +28 = a COM-style Release; its AddRef twin is 0x823314C0).
+# Both callers are this-adjustor thunks that tail-call it: 0x823346C8 `addi r3,r3,-32; b`, 0x823319D8
+# `addi r3,r3,-36; b` (tools/ppc_dis.py).
+"0x823320D8" = { }  # from 0x823346CC, 0x823319DC
+
+# Code pointers into unclaimed gaps, stored in data (vtables, callback tables) or built in code (lis/addi:
+# callbacks passed at run time), accepted by tools/pointer_fixpoint.py pass 1: the scratch listing fits
+# in the gap (or continues only into a registered function it branches to: "then the registered tail"),
+# ends in a terminator and reads no register that is undefined at a function entry. The comment says
+# where the pointer is stored ("pointer at") or built ("built at", inside the code range).
+"0x8224EA30" = { }  # 6 instructions, built at 0x82157954 (+45 more)
+"0x822DE9F8" = { }  # 21 instructions, pointer at 0x820E6AC0
+"0x823052B8" = { }  # 8 instructions, pointer at 0x820E83D8
+"0x8231CEE4" = { }  # 4 instructions, pointer at 0x82104BE8
+"0x82323F68" = { }  # 2 instructions, pointer at 0x820021E4 (+4 more)
+"0x82323F70" = { }  # 2 instructions, pointer at 0x8200222C
+"0x82323F80" = { }  # 22 instructions, pointer at 0x8200224C (+2 more)
+"0x82323FD8" = { }  # 2 instructions, pointer at 0x820021E0 (+2 more)
+"0x823291B8" = { }  # 2 instructions, pointer at 0x82002204 (+4 more)
+"0x823291C0" = { }  # 2 instructions, pointer at 0x820021EC (+4 more)
+"0x823291C8" = { }  # 2 instructions, pointer at 0x8200259C
+"0x823291D8" = { }  # 2 instructions, pointer at 0x820021FC (+4 more)
+"0x823291E0" = { }  # 2 instructions, pointer at 0x82002200 (+4 more)
+"0x823291E8" = { }  # 2 instructions, pointer at 0x820021F8 (+4 more)
+"0x823291F0" = { }  # 61 instructions, pointer at 0x820025BC
+"0x8232A590" = { }  # 2 instructions, pointer at 0x82002214 (+4 more)
+"0x8232A598" = { }  # 2 instructions, pointer at 0x82002588 (+1 more)
+"0x8232A5A0" = { }  # 2 instructions, pointer at 0x820021E8 (+4 more)
+"0x8232A5A8" = { }  # 2 instructions, pointer at 0x82002580 (+1 more)
+"0x8232A5B0" = { }  # 2 instructions, pointer at 0x82002550 (+1 more)
+"0x8232A5B8" = { }  # 2 instructions, pointer at 0x82002220 (+4 more)
+"0x8232A5C0" = { }  # 2 instructions, pointer at 0x820021F4 (+4 more)
+"0x8232A5C8" = { }  # 2 instructions, pointer at 0x820021F0 (+4 more)
+"0x8232A5D0" = { }  # 63 instructions, pointer at 0x82002634
+"0x8232F9E0" = { }  # 6 instructions, pointer at 0x8200275C
+"0x82330858" = { }  # 2 instructions, pointer at 0x820026F4
+"0x823314F0" = { }  # 2 instructions, pointer at 0x820027A8
+"0x823343D8" = { }  # 11 in the gap, then the registered tail sub_82334404, pointer at 0x82002914
+"0x82341BA0" = { }  # 2 instructions, pointer at 0x82006774 (+1 more)
+"0x82342110" = { }  # 2 instructions, pointer at 0x82006770 (+1 more)
+"0x82342120" = { }  # 2 instructions, pointer at 0x820067E4
+"0x823439E0" = { }  # 2 instructions, pointer at 0x82006784 (+1 more)
+"0x8250A5B0" = { }  # 4 in the gap, then the registered tail sub_8250A5C0, pointer at 0x82056840
+"0x8255AA90" = { }  # 8 instructions, pointer at 0x820693D8 (+2 more)
+"0x8256C6E0" = { }  # 4 instructions, pointer at 0x82069BE4
+"0x8256C868" = { }  # 4 instructions, pointer at 0x82069C2C
+"0x825A1D50" = { }  # 9 in the gap, then the registered tail sub_825A1D74, pointer at 0x8206C7F0
+"0x825A4498" = { }  # 2 instructions, pointer at 0x8206C880
+"0x825B4A08" = { }  # 19 in the gap, then the registered tail sub_825B4A54, sub_825B4A60, sub_825B4A6C, sub_825B4A78, sub_825B4A84, sub_825B4A90, sub_825B4A9C, pointer at 0x8206CC84
+"0x825C1000" = { }  # 11 instructions, pointer at 0x820739A8
+"0x8269A6B8" = { }  # 4 instructions, pointer at 0x82087654 (+8 more)
+"0x8269AA68" = { }  # 10 instructions, pointer at 0x82087824 (+2 more)
+"0x8269AA90" = { }  # 10 instructions, pointer at 0x82087828 (+2 more)
+"0x8269AAB8" = { }  # 10 instructions, pointer at 0x8208782C (+2 more)
+"0x8269AAE0" = { }  # 10 instructions, pointer at 0x82087830 (+2 more)
+"0x8269AF00" = { }  # 8 instructions, pointer at 0x82087864 (+1 more)
+"0x8269AF20" = { }  # 4 instructions, built at 0x826A3E74 (+1 more)
+"0x8269AF30" = { }  # 4 instructions, built at 0x826A3F9C
+"0x8269AF40" = { }  # 4 instructions, built at 0x826A429C
+"0x8269AF50" = { }  # 4 instructions, built at 0x826A42EC
+"0x8269AF60" = { }  # 4 instructions, built at 0x826A407C
+"0x8269AF70" = { }  # 4 instructions, built at 0x826A3DD4
+"0x8269AF80" = { }  # 4 instructions, built at 0x826A482C
+"0x8269AF90" = { }  # 4 instructions, built at 0x826A40CC
+"0x8269AFA0" = { }  # 4 instructions, built at 0x826A3E24
+"0x8269AFB0" = { }  # 4 instructions, built at 0x826A433C
+"0x826F4AD8" = { }  # 2 instructions, pointer at 0x820A2AEC
+"0x82728680" = { }  # 1 instructions, built at 0x82714D30 (+1 more)
+"0x827DF1A8" = { }  # 6 in the gap, then the registered tail sub_827DF1C0, pointer at 0x820B9EDC
+"0x82819360" = { }  # 11 instructions, pointer at 0x820BE914 (+12 more)
+"0x82874520" = { }  # 1 instructions, pointer at 0x828B8600
+
+# Rejected by tools/pointer_fixpoint.py but real entries (checked by hand with tools/ppc_dis.py, 2026-10-05). In both
+# the generator had registered the continuation as a function of its own, so the entry looked like a fragment or
+# did not fit its gap; a call through the pointer would stop the game ("Call to invalid or unregistered function").
+#   0x825C0508: vtable entry (vtable 0x82073934: 5 of the 6 neighbouring words are registered functions). A 17-case
+#     switch on a byte argument (cmplwi cr6,r8,16; table 0x825C0548) whose case labels 0x825C05B8, 05DC, 0600, 0624,
+#     0660, 066C and the default 0678 the generator had made separate functions.
+#   0x8275E178: qsort comparator, built at 0x827773FC (lis/addi into r6, then bl 0x825F03C8 = qsort with width 4);
+#     reads only r3/r4; its tail 0x8275E1EC (subfc r11,r11,r8) had become a function that reads r8/r11 at entry.
+"0x825C0508" = { }  # pointer at 0x8207394C
+"0x8275E178" = { }  # built at 0x827773FC
+
+# Removed after the crash audit (2026-10-05): pointer_fixpoint.py had accepted 0x823C47F8, 0x823C4810, 0x823C4BE8 and
+# 0x823C4C00, but their "pointers" at 0x8202FBC8-0x8202FC30 are (address, state) pairs of a C++ EH IP-to-state map
+# (..., 823C467C -1, 823C47F8 0, 823C4810 -1, ...): state changes inside their parent functions, never called. The
+# generator had kept the parents whole and made unused duplicate copies of their tails.

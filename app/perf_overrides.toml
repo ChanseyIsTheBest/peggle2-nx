@@ -1,0 +1,142 @@
+# Code generation options for speed. Root keys: they must stay outside any table.
+#
+# They only change how the C++ is written, so the compiler can keep guest registers in host registers instead of the
+# PPCContext in memory and drop dead stores; what the guest sees is the same. The same generated code is used for the
+# PC and the Switch builds, so every change here is tested on the PC first (soak runs, recordings compared with
+# tools/compare_raw.py).
+#
+# The set measured on the console by the reference ports (nfsmw-nx docs/toolchain.md: ~14 % of the main thread was in
+# __savegprlr/__restgprlr; masseffect-nx perf_overrides.toml: about -13 % instructions):
+cr_as_local = true
+non_volatile_as_local = true
+xer_as_local = true
+ctr_as_local = true
+# 2026-10-07 (the user's 50-60 % CPU goal; the options sa2-nx's and futari-nx's optimised codegen ship): the lwarx
+# reservation as a C++ local; skip_msr (no mfmsr/mtmsrd fences, ctx.msr stores or global lock around the guest atomic
+# sequences: a stwcx. is already a compare-and-swap); dform_disp_split (D-form loads/stores as base + zext(reg) + disp:
+# differs only when reg + disp crosses 2^32, a guest fault either way); fctiwz_inline (fcvtzs + NaN select).
+# masseffect-nx measured skip_msr + reserved_as_local at -3.4 % total CPU.
+reserved_as_local = true
+skip_msr = true
+dform_disp_split = true
+fctiwz_inline = true
+# sa2-nx round 7 (its SDK change, taken 2026-10-07): no host flush-mode switch (an `msr fpcr` on AArch64, very slow on
+# the A57: SA2's VMX-heavy thread spent 20-26 % of its time right after one) for floating-point moves (lfd/stfd forms,
+# stfiwx, fmr, fabs, fnabs, fneg: bits only), and lfs/stfs in VMX mode convert through rex::ppc::SingleToDoubleAnyMode
+# / DoubleToSingleAnyMode (the IEEE result in either mode; denormal cases on a cold path with the mode cleared).
+fp_moves_modeless = true
+# 2026-10-07 (the user: all of sa2-nx's CPU work): non_argument_as_local and elide_lr_stores, the rest of the diet.
+#
+# non_argument_as_local: r0, r2, r11, r12, f0 and v32-v63 (the volatile registers that carry no argument in the
+# Xbox 360 ABI) become C++ locals too. With it a value can no longer cross a call in them, so every place where one does
+# was listed with sa2-nx's audit on code generated without the option (docs/peggle2-notes.md, "non_argument_as_local"):
+#   python tools/non_argument_audit.py app/generated/default --noreturn=825F7C30,825F2630,82714728,82318D20
+# (longjmp, _CxxThrowException, an error exit that ends in an indirect call and never returns, and a thread exit that
+# ends in ExTerminateThread: the code after a call to them belongs to other paths.)
+#   - arguments in r12 read on entry: the SDK's __save*/__rest* helpers (they keep these registers in ctx by the
+#     generator's rule; their calls are elided anyway), 4,273 EH/SEH funclets that are share_registers already (their
+#     owners hand r12 over around the inline `bl`), the stack probe, and 177 unwind funclets of one function
+#     (0x824D6028-0x824D7BA8) that the generator does not mark: nothing calls them directly, only the C++ EH dispatch
+#     (_CallSettingFrame: r12 = frame, then blrl). These, the dispatch itself and the continuation jump
+#     (`mr r12,r5; bctr`) keep the registers in ctx (non_argument_as_local_keep below, sa2-nx's generator option); a
+#     caller hands its localized ones over around a call to them. Guest exceptions are never dispatched here (the
+#     SDK's RtlRaiseException only handles SetThreadName); the path is kept exact anyway.
+#   - one value returned in r11, by a __finally funclet that reloads it for its owner (share_registers: the owner's
+#     copy-back takes it). 13 `subfe rX,r11,r11` read r11 after a call, but the result depends only on the carry.
+#   - three functions read v57-v63 before writing them: the unaligned-load shift registers of software-pipelined
+#     loops; tools/vec_shiftout.py proves no entry byte reaches a store, so zero-initialized locals give the same
+#     results. (The audit's other vector reports were its own false alarm, fixed in Peggle's copy: after one run of
+#     element writes, such as vlogefp128 v60, it skipped an adjacent run of another register.)
+#   - no hook, native or SDK runtime code reads or writes ctx.r0/r2/r11/r12/f0/v32-v63; the setjmp callers write them
+#     again before reading them after ppc_setjmp.
+non_argument_as_local = true
+non_argument_as_local_keep = [
+  0x825F1CE4,  # the stack probe (frame size in r12)
+  0x82603730,  # _CallSettingFrame (r12 = frame, blrl to the funclet)
+  0x825F0AD4,  # the EH continuation jump (mr r12,r5; bctr)
+  # unwind funclets of 0x824D6028-0x824D7BA8's owner, reached only through _CallSettingFrame (they read r12 on entry)
+  0x824D6028, 0x824D6050, 0x824D6078, 0x824D60A0, 0x824D60C8, 0x824D60F0, 0x824D6118, 0x824D6140, 0x824D6168,
+  0x824D6190, 0x824D61B8, 0x824D61E0, 0x824D6208, 0x824D6230, 0x824D6258, 0x824D6280, 0x824D62A8, 0x824D62D0,
+  0x824D62F8, 0x824D6320, 0x824D6348, 0x824D6370, 0x824D6398, 0x824D63C0, 0x824D63E8, 0x824D6410, 0x824D6438,
+  0x824D6460, 0x824D6488, 0x824D64B0, 0x824D64D8, 0x824D6500, 0x824D6528, 0x824D6550, 0x824D6578, 0x824D65A0,
+  0x824D65C8, 0x824D65F0, 0x824D6618, 0x824D6640, 0x824D6668, 0x824D6690, 0x824D66B8, 0x824D66E0, 0x824D6708,
+  0x824D6730, 0x824D6758, 0x824D6780, 0x824D67A8, 0x824D67D0, 0x824D67F8, 0x824D6820, 0x824D6848, 0x824D6870,
+  0x824D6898, 0x824D68C0, 0x824D68E8, 0x824D6910, 0x824D6938, 0x824D6960, 0x824D6988, 0x824D69B0, 0x824D69D8,
+  0x824D6A00, 0x824D6A28, 0x824D6A50, 0x824D6A78, 0x824D6AA0, 0x824D6AC8, 0x824D6AF0, 0x824D6B18, 0x824D6B40,
+  0x824D6B68, 0x824D6B90, 0x824D6BB8, 0x824D6BE0, 0x824D6C08, 0x824D6C30, 0x824D6C58, 0x824D6C80, 0x824D6CA8,
+  0x824D6CD0, 0x824D6CF8, 0x824D6D20, 0x824D6D48, 0x824D6D70, 0x824D6D98, 0x824D6DC0, 0x824D6DE8, 0x824D6E10,
+  0x824D6E38, 0x824D6E60, 0x824D6E88, 0x824D6EB0, 0x824D6ED8, 0x824D6F00, 0x824D6F28, 0x824D6F50, 0x824D6F78,
+  0x824D6FA0, 0x824D6FC8, 0x824D6FF0, 0x824D7018, 0x824D7040, 0x824D7068, 0x824D7090, 0x824D70B8, 0x824D70E0,
+  0x824D7108, 0x824D7130, 0x824D7158, 0x824D7180, 0x824D71A8, 0x824D71D0, 0x824D71F8, 0x824D7220, 0x824D7248,
+  0x824D7270, 0x824D7298, 0x824D72C0, 0x824D72E8, 0x824D7310, 0x824D7338, 0x824D7360, 0x824D7388, 0x824D73B0,
+  0x824D73D8, 0x824D7400, 0x824D7428, 0x824D7450, 0x824D7478, 0x824D74A0, 0x824D74C8, 0x824D74F0, 0x824D7518,
+  0x824D7540, 0x824D7568, 0x824D7590, 0x824D75B8, 0x824D75E0, 0x824D7608, 0x824D7630, 0x824D7658, 0x824D7680,
+  0x824D76A8, 0x824D76D0, 0x824D76F8, 0x824D7720, 0x824D7748, 0x824D7770, 0x824D7798, 0x824D77C0, 0x824D77E8,
+  0x824D7810, 0x824D7838, 0x824D7860, 0x824D7888, 0x824D78B0, 0x824D78D8, 0x824D7900, 0x824D7928, 0x824D7950,
+  0x824D7978, 0x824D79A0, 0x824D79C8, 0x824D79F0, 0x824D7A18, 0x824D7A40, 0x824D7A68, 0x824D7A90, 0x824D7AB8,
+  0x824D7AE0, 0x824D7B08, 0x824D7B30, 0x824D7B58, 0x824D7B80, 0x824D7BA8,
+]
+# elide_lr_stores: `ctx.lr = <return address>` is no longer stored before every call. Only hooks read ctx.lr as their
+# caller, and every direct call to one of them keeps its store (lr_keep_callees, Peggle's generator option): the heap
+# tracker (the allocator entry points, RtlAllocateHeap/FreeHeap/ReAllocateHeap, CreateThread) and the string-release
+# check of app/src/peggle2_debug_hooks.cpp, and the throw logger (app/src/peggle2_throw_log.cpp). Their immediate
+# caller stays exact; deeper frames of the heap tracker's guest stack walk (saved LRs) may now show an older return
+# address, and so may the console profiler's caller attribution.
+elide_lr_stores = true
+lr_keep_callees = [
+  0x82369B48, 0x825EEA68, 0x825EE8C0, 0x823188B0, 0x823189E8,  # operator new, malloc, free, XMemAlloc, XMemFree
+  0x8231BAE0, 0x8231C3D8, 0x8231C6D0,  # RtlAllocateHeap, RtlFreeHeap, RtlReAllocateHeap
+  0x82318E18,  # CreateThread
+  0x822E9420,  # the string-handle release check
+  0x825F2630,  # _CxxThrowException (the throw logger)
+]
+# 2026-10-13 (the user: sa2-nx's three CPU rounds of 2026-10-12; its SDK changes taken as a patch, docs/peggle2-notes.md):
+#   - fp_compares_modeless: float compares need no host flush mode (sasrt-nx's);
+#   - fp_mode_lookahead: a lookahead before each mode switch; WITHOUT the bet past a branch (sa2-nx measured that the
+#     any-mode forms on a bet cost 94,000 tests a frame to save nine switches);
+#   - fcti_inline: fctidz as fcvtzs + NaN select, and fctid / fctiw rounding halves to even on AArch64. A CORRECTION of
+#     the Switch build: simde's portable conversion is C round(), halves away from zero (10 fctid sites in Peggle 2;
+#     the PC build was always right);
+#   - fp_copy_pairs: an lfs directly followed by an stfs of the same register copies the bits without a mode (only
+#     where it replaces a switch for certain);
+#   - div_inline: divw / divwu / divd / divdu as the host instruction with one select (a constant divisor keeps the
+#     C expression).
+# Not taken: rotate_word_narrow (exact, but larger code with the Switch compiler), dcbt_prefetch (no measurement),
+# fp_copy_only_functions (a loss in sa2-nx).
+fp_compares_modeless = true
+fp_mode_lookahead = true
+fp_mode_lookahead_past_branch = false
+fcti_inline = true
+fp_copy_pairs = true
+div_inline = true
+# Left off: args_in_registers.
+#
+# share_registers: split pieces and funclets that read r14-r31, cr, ctr or xer before writing them must share their
+# parent's registers. Found with (on code generated WITHOUT these marks):
+#   python tools/read_before_write.py app/generated/default --noreturn=825F7C30,825F2630 --toml
+# 0x825F7C30 is the guest longjmp (restores r14-r31/cr/lr/r1 from the jmp_buf) and 0x825F2630 _CxxThrowException:
+# both noreturn. Without the second, 92 more functions show up: the code after a throw call belongs to another path.
+# Do NOT mark ordinary functions (masseffect-nx: a loop-blind scan marked 61 and zeroed a caller's r27, a crash at
+# startup).
+#
+# Result on this game (2026-10-05): 34 functions, none marked, all harmless:
+#   - sub_825F7760 setjmp (mfcr reads cr1-cr7 only to store them in the jmp_buf); sub_822DD9E8 mfcr (saves the CR);
+#   - sub_8260E630, sub_8260E9C0 `xor r30,r30,r30` (zero whatever r30 was); sub_822EDEC0, sub_823524E8, sub_82899100
+#     `subfe rX,rX,rX` (the result depends only on the carry);
+#   - sub_8231CEE4 an SEH filter funclet (`mr r8,r8` scope marker, r31 = the parent's frame): only runs while an
+#     exception is dispatched, which the runtime does not do;
+#   - 26 ordinary functions (normal `mflr r12` prologue, entered with `bl` or a this-adjustor `b`) at
+#     0x8273xxxx-0x8281xxxx whose reads sit on paths the original only takes with the register set: the code
+#     materializes a flag (li r10,1 / li r10,0) and branches on it again, and the dataflow does not track values
+#     (checked by hand on sub_8273AC98). On a feasible path the original would read its caller's r14-r31, which no
+#     MSVC code does; with locals it reads 0 there instead, so nothing that really executes changes.
+#   (Correction, same day: sub_8231CEE4 IS a split piece; the first classification only looked for `b`/`bl` and
+#   missed conditional branches. Marked below.)
+
+[functions]
+# sub_8231CEE4: the tail of sub_8231C6D0 (the game's __try { RaiseException } wrapper used for SetThreadName), entered
+# with beq/bne at 0x8231C??? from the parent's body (3 conditional branches) after the __try block; reads the
+# parent's frame pointer r31 (`addi r12,r31,320`, then the handler funclet sub_8231CF38 reads through r12). As a
+# function of its own with r31 a local it saw 0: the PC build crashed 4.6 s after start reading guest 0x60
+# (2026-10-05).
+"0x8231CEE4" = { share_registers = true }

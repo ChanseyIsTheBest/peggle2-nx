@@ -1,0 +1,22 @@
+# Peggle 2 for the Nintendo Switch: your settings. The game writes this file when there is none; delete it to get
+# the defaults back. Everything else is built into peggle2.nro.
+
+# Pictures a second: 30 = as the Xbox 360 game, 60 = a picture every screen refresh. The game runs at the same speed
+# either way (60 logic steps a second); 60 needs more of the console and is not reached everywhere.
+peggle2_fps = 30
+
+# Language: "en", "de", "fr", "es", "it" or "pt" (Brazilian Portuguese). Empty = English.
+peggle2_language = ""
+
+# Controllers (up to four: the handheld Joy-Cons, Pro Controllers, Joy-Con pairs, or single Joy-Cons held sideways).
+# Face buttons by position, as on the Xbox 360 pad the game was made for: the bottom button (B on Switch
+# controllers) is A, the right one (A) is B, the left one (Y) is X, the top one (X) is Y. false = by letter.
+input_xbox_layout = true
+# Single Joy-Cons are held sideways, one per player.
+input_joycon_sideways = true
+# Each player's own layout: which Switch buttons press an Xbox button, as a list of A B X Y L R ZL ZR PLUS MINUS
+# LSTICK RSTICK UP DOWN LEFT RIGHT SL SR, or NONE. Keys: input_p1_ to input_p4_ followed by a b x y lb rb lt rt start
+# back ls rs up down left right. Empty or missing = the default above. Examples (remove the # to use one):
+# input_p1_a = "B, ZR"          # player 1: B or ZR shoots
+# input_p2_lb = "L, SL"         # player 2: L or SL is the left bumper
+# input_p3_start = "PLUS, MINUS"

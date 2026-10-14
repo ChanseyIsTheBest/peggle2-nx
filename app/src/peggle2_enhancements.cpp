@@ -1,0 +1,368 @@
+// Peggle 2's enhancements and their switches. The rule for every ReXGlue Switch port on this machine (the user's
+// request, relayed from the Mushihimesama session together with the UnleashedRecomp-NX / MarathonRecomp-NX work):
+//   - each enhancement has its own key (cvar) in peggle2.toml;
+//   - it belongs to the CPU or the non-CPU group, and is active only when both its own key and its group's master
+//     (peggle2_cpu_enhancements, peggle2_noncpu_enhancements) are on;
+//   - one line at startup, [enhancements], lists every one and whether it is active, so a console log says exactly
+//     what ran;
+//   - what cannot be switched at run time (code generation options) is listed with how this build was made: the
+//     only the optimised build is delivered (no A/B NRO pair; tools/codegen.ps1 -Classic is a local diagnostic);
+//   - a verify configuration (peggle2_cpu_verify) proves the CPU enhancements give the same result as the original
+//     paths: every self-check of the renderer's fast paths compares on every use and a "[verify]" line counts them.
+// A master works by writing its members' "off" value before anything reads them, so the code behind a key only ever
+// looks at its own key. The table is the one place to add an enhancement: tools/make_enhancement_configs.py writes
+// the premade configs (app/switch/peggle2.toml, app/configs/*.toml) from it. Keep it in step with the notes.
+
+#include "peggle2_enhancements.h"
+
+#include <chrono>
+#include <condition_variable>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
+
+#include <fmt/format.h>
+
+#include <rex/cvar.h>
+#include <rex/logging.h>
+
+#include "me/me_verify.h"
+
+REXCVAR_DEFINE_BOOL(peggle2_cpu_enhancements, true, "Peggle2",
+                    "Master switch of the CPU enhancements: off turns every one of them off whatever its own key says "
+                    "(the [enhancements] line at startup lists them)");
+REXCVAR_DEFINE_BOOL(peggle2_noncpu_enhancements, true, "Peggle2",
+                    "Master switch of the non-CPU enhancements (rendering, loading): off turns every one of them off "
+                    "whatever its own key says");
+// From futari-nx: the verify configuration (app/configs/peggle2_cpu_verify.toml). The same enhancements, with every
+// self-check of the renderer's fast paths comparing on EVERY use instead of the first masseffect_native_verify_n
+// (2048) / masseffect_native_fast_copy_verify (256). Each comparison runs the original path too, so it is slower: for a
+// test session, not for play. Every 10 s the log has "[verify] checks done: ... | differences: N"; N must be 0 (a
+// difference also logs DIFFERENCE / MISMATCH and turns that one fast path off for the rest of the session).
+REXCVAR_DEFINE_BOOL(peggle2_cpu_verify, false, "Peggle2",
+                    "Verify mode: every fast path's self-check compares with the original path on every use; "
+                    "\"[verify]\" log lines count the checks and the differences (must be 0). Slower: test only");
+
+// The profiler, outside the enhancement table and its masters (the user's request, relayed by the SA2 session): on in
+// the default peggle2.toml and every premade config except the verify one, so every console run leaves a profile and
+// a master switched off cannot turn profiling off with it. Two plain keys:
+//   switch_profile_stacks (here; sdk/src/ui/switch_perf.cpp reads it): the console CPU sampler, 1 ms stack samples of
+//     every busy thread into logs/rex/rex_profile.log (as logs/rex/stacks_profile.flag does);
+//   masseffect_gpu_marks_categories (the renderer's, default true): a GPU timestamp at every pass-category change, the
+//     "GPU per Swap" lines with the time per category and the idle gap (the image does not change).
+REXCVAR_DEFINE_BOOL(switch_profile_stacks, true, "Peggle2",
+                    "Switch: the CPU sampler pauses busy threads 1000 times a second and logs every pc to "
+                    "logs/rex/rex_profile.log (as logs/rex/stacks_profile.flag does); off only in the verify config");
+// From sa2-nx: the console profile file at all (sdk/src/ui/switch_perf.cpp reads it by name). The release build's
+// built-in settings turn it off (app/peggle2_switch_defaults.toml): no logs/rex/rex_profile.log, no sampling.
+REXCVAR_DEFINE_BOOL(switch_profile_report, true, "Peggle2",
+                    "Switch: write the console profile every 10 s to logs/rex/rex_profile.log (false = no file, no "
+                    "sampling; the FPS overlay keeps going)");
+
+// All the native replacements at once (each also has its own peggle2_cpu_native_* key), for A/B runs of one batch
+// against the same build without it.
+REXCVAR_DEFINE_BOOL(peggle2_cpu_natives, true, "Peggle2",
+                    "The native replacements of hot guest functions (src/cpu): false turns all of them off");
+
+// Written by tools/codegen.ps1 into app/generated/codegen_profile.txt and passed in by CMakeLists.txt.
+#ifndef PEGGLE2_CODEGEN_PROFILE
+#define PEGGLE2_CODEGEN_PROFILE "unknown"
+#endif
+
+namespace peggle2::enhancements {
+namespace {
+
+enum class Group { kCpu, kNonCpu };
+
+// One row per enhancement: {name, group, key, on value, off value, what}. The on value is also Peggle 2's default when
+// peggle2.toml (or the command line / environment) does not set the key; the off value is what the group's master
+// writes. tools/make_enhancement_configs.py parses these rows: keep each one in this shape.
+struct Enhancement {
+  const char* name;
+  Group group;
+  const char* key;
+  const char* on_value;
+  const char* off_value;
+  const char* what;
+  // Never defaulted on: only a toml line (or the environment / command line) turns it on, and the premade configs
+  // write its off value. For the ones other ports saw break (the shared notebook's known issues).
+  bool explicit_only = false;
+};
+constexpr bool kExplicitOnly = true;
+
+constexpr Enhancement kEnhancements[] = {
+    {"gpu_wait_sleep", Group::kCpu, "masseffect_wait_blocking_ring", "true", "false",
+     "the game's GPU busy-wait (sub_8261D378) sleeps until the ring moves; native renderer only"},
+    {"wait_reg_mem_events", Group::kCpu, "masseffect_native_wait_reg_mem_us", "1000", "0",
+     "the ring's WAIT_REG_MEM parks until an interrupt, write pointer or swap (at most 1 ms); off = 50 us polling"},
+    // The ring thread: masseffect-nx's shipped profile (relayed by the Mushihimesama session; masseffect-nx
+    // docs/optimization-paths.md has the console runs). Off in the renderer's code, on for Peggle 2. PC check
+    // (docs/peggle2-notes.md): all of them together drew game frames 1000-1399 pixel-identical to the baseline.
+    // Deferred recording: explicit only. The order relayed by the SA2 session (2026-10-07) was to turn it on, as sa2-nx's
+    // round 5 did, and the 100-160 ms PC frames other ports saw are fixed (sa2-nx's masseffect_deferred_recording.cpp
+    // yields on Windows, taken here). But futari-nx's lockstep captures (2026-10-07) found it NOT pixel-identical: a menu
+    // fade differed on 4 frames by up to 65 levels, differently in each run, while five runs without it agreed. Peggle 2's
+    // runs do not reproduce their fades (docs/peggle2-notes.md, lockstep), so they cannot clear it; off until the
+    // cause is found. PC: ~0.4 ms of ring CPU per Swap moves to the worker with it.
+    {"ring_deferred_recording", Group::kCpu, "masseffect_native_deferred_recording", "true", "false",
+     "a worker records the ring's Vulkan commands (NOT pixel-identical in futari-nx's lockstep)", kExplicitOnly},
+    {"ring_deferred_fast", Group::kCpu, "masseffect_deferred_native_fast", "true", "false",
+     "the deferred queue is published every masseffect_deferred_native_batch commands", kExplicitOnly},
+    {"ring_deferred_update", Group::kCpu, "masseffect_deferred_native_update", "true", "false",
+     "descriptor set updates are queued to the worker too", kExplicitOnly},
+    // sa2-nx round 3: the upload buffer (every draw's vertices and indices) in CPU-cached memory, published with
+    // vkFlushMappedMemoryRanges before each submit (SA2's console: 5,251 MB/s of CPU writes there against 2,506 MB/s in
+    // the uncached type the SDK picks).
+    // Not exact (the sample missed real changes in 9 of 121 PC logs; sa2-nx turned it off in its round 7).
+    {"ring_fingerprint_sampling", Group::kCpu, "masseffect_native_fingerprints_sampling", "8", "0",
+     "stable textures rechecked by a sampled fingerprint (NOT exact: can miss a change)", kExplicitOnly},
+    {"ring_upload_cached", Group::kCpu, "masseffect_native_upload_memory", "1", "0",
+     "the upload buffer in CPU-cached memory, flushed before each submit (SA2 console: 2x the CPU write speed)"},
+    {"ring_flat_identity", Group::kCpu, "masseffect_native_flat_identity", "true", "false",
+     "shader identity lookups in a flat table (ME: 0.7-0.9 ms)"},
+    {"ring_fast_pair", Group::kCpu, "masseffect_native_fast_pair", "true", "false",
+     "fast VS/PS pairing (ME: 0.5-0.7 ms)"},
+    {"ring_raw_microcode", Group::kCpu, "masseffect_native_raw_microcode", "true", "false",
+     "microcode compared raw, without byte swapping (ME: 0.4-0.6 ms)"},
+    {"ring_pm4_fast", Group::kCpu, "masseffect_native_pm4_fast", "true", "false",
+     "runs of constant/fetch register writes handled four words at a time with NEON (ME: 0.4-0.8 ms)"},
+    {"ring_notify_no_lock", Group::kCpu, "masseffect_notify_no_lock", "true", "false",
+     "ring progress notified without taking the lock when nobody waits (ME: 0.2-0.4 ms)"},
+    {"ring_compare_fast", Group::kCpu, "masseffect_native_compare_fast", "true", "false",
+     "faster state comparisons (ME: 0.5 ms)"},
+    {"ring_fast_copy", Group::kCpu, "masseffect_native_fast_copy", "true", "false",
+     "vertex copies with the fast path, checked against the slow one for masseffect_native_fast_copy_verify draws"},
+    // sa2-nx round 6: mode 2 = the A57's CRC32C + CRC32 instructions, two lanes (masseffect_crc_fingerprint.h; the Switch
+    // build has -march=armv8-a+crc+crypto); the PC falls back to mode 1 (XXH3) by itself. sa2-nx's software-shim tests:
+    // every single-bit flip and zero buffer of each length 0-256 changes it, no collision in 200,000 random buffers.
+    {"ring_fingerprint_crc32", Group::kCpu, "masseffect_native_fingerprint_mode", "2", "0",
+     "fingerprints with the hardware CRC32 pair on the Switch (mode 2; XXH3 mode 1 on the PC)"},
+    {"ring_dedupe_large", Group::kCpu, "masseffect_native_dedupe_max_fingerprint", "16384", "0",
+     "vertex payloads up to 16 KB deduplicated by fingerprint (ME: XXH3 share of the ring 15 -> 9 %)"},
+    {"ring_indices_cache", Group::kCpu, "masseffect_native_indices_cache", "true", "false",
+     "converted index buffers cached"},
+    {"ring_pipelines_prewarm", Group::kCpu, "masseffect_native_pipelines_prewarm", "true", "false",
+     "pipelines of earlier runs created at startup"},
+    // sa2-nx's CPU rounds of 2026-10-12, the SDK's run-time keys (the rest is build-time: app/perf_overrides.toml and
+    // the PEGGLE2_GEN_* / PEGGLE2_SWITCH_* options of app/CMakeLists.txt).
+    {"critsec_pcr_owner", Group::kCpu, "kernel_critsec_pcr_owner", "true", "false",
+     "critical sections take their owner from the guest context (r13 -> KPCR) instead of a thread lookup"},
+    // The Switch build only (threading_posix.cpp): "not in this build" on the PC.
+    {"thread_signal_skip_idle", Group::kCpu, "thread_signal_skip_idle", "true", "false",
+     "no condition-variable notify (a syscall on Horizon) for an event or semaphore nobody is blocked on"},
+    // sa2-nx's renderer GPU optimisations (its docs/gpu-optimisation-candidates.md), taken with its renderer files.
+    {"edram4_clear_color0", Group::kNonCpu, "peggle2_native_edram4_clear_color0", "true", "false",
+     "a depth + color 0 clear drawn through a 4x alias is cleared in the 1x owners (no 4x draw and 4x -> 1x transfer)"},
+    {"constants_dedupe", Group::kNonCpu, "peggle2_native_constants_dedupe", "true", "false",
+     "a new shader-constant generation with the bytes uploaded last reuses that block (no upload, no rebind)"},
+    {"pass_narrow_end", Group::kNonCpu, "peggle2_native_pass_narrow_end", "true", "false",
+     "a render pass's end dependency names its real consumers instead of MEMORY_READ|WRITE"},
+    // Off in sa2-nx until a 30-minute play test (Unleashed lost the GPU after 15-20 min with depth-clear/ZCULL changes).
+    {"zcull_1x_depth", Group::kNonCpu, "peggle2_native_zcull_1x_depth", "true", "false",
+     "1x depth views keep their ZCULL plane (copy-engine stencil imports use masked stencil passes)", kExplicitOnly},
+    // sa2-nx round 7's dedupe sync epochs (peggle2_native_dedupe_sync_epochs) are registered by the renderer itself
+    // now (PEGGLE2_RING_GPU_ENHANCEMENT in me_native_system.cpp, non-CPU group), as are sa2-nx's GPU keys.
+    {"vs_relaxed_match", Group::kNonCpu, "masseffect_native_vs_relaxed_match", "true", "false",
+     "vertex shaders whose fetch swizzles D3D patched are matched to the library"},
+    {"asset_pack", Group::kNonCpu, "asset_pack", "true", "false",
+     "game data read from game_root.nxpack instead of the folder (used anyway when only the pack exists)"},
+};
+
+// Settings of an enhancement that are not on/off themselves: Peggle 2's default when nothing sets them.
+struct Parameter {
+  const char* key;
+  const char* value;
+};
+
+constexpr Parameter kParameters[] = {
+    {"masseffect_native_deferred_recording_naps", "8"},  // masseffect-nx's value with deferred recording
+    // The full game, not the trial (the user's request, 2026-10-13): the SDK's default licence mask is 0, which the
+    // game reads as the trial version; with no toml line it is the purchased game.
+    {"license_mask", "1"},
+};
+
+// Nothing set the key (no toml line, environment variable or command-line flag): its value is the code's default.
+// By source, not by value: a toml line that sets a key to its code default (e.g. a flag = false) is the user's choice
+// and must stay. An old peggle2.toml without the newer keys gets Peggle 2's defaults for them.
+bool UnsetByUser(const char* key) {
+  return !rex::cvar::GetFlagByName(key).empty() && rex::cvar::GetFlagSource(key) == rex::cvar::Source::kDefault;
+}
+
+bool IsOff(const Enhancement& e, std::string_view value) {
+  return value.empty() || value == e.off_value || (std::string_view(e.off_value) == "false" && value == "0");
+}
+
+// The natives registered at static initialisation (PEGGLE2_NATIVE): a function-local static, so registration does not
+// depend on the order in which translation units are initialised.
+std::vector<Native*>& Natives() {
+  static std::vector<Native*> natives;
+  return natives;
+}
+
+bool g_verify = false;
+std::atomic<uint64_t> g_native_checks{0}, g_native_differences{0};
+
+std::mutex g_report_mutex;
+std::condition_variable g_report_cv;
+bool g_report_stop = false;
+std::thread g_report_thread;
+
+}  // namespace
+
+bool RegisterNative(Native* n) {
+  Natives().push_back(n);
+  return true;
+}
+
+bool VerifyMode() { return g_verify; }
+
+void VerifyCheck(uint64_t n) { g_native_checks.fetch_add(n, std::memory_order_relaxed); }
+std::atomic<uint64_t> g_native_check_ns{0};
+void CheckTime(uint64_t ns) { g_native_check_ns.fetch_add(ns, std::memory_order_relaxed); }
+
+void VerifyDifference() {
+  g_native_differences.fetch_add(1, std::memory_order_relaxed);
+  ::me::native::VerifyDifference();  // into the renderer's [verify] line too
+}
+
+bool GuestCodeMatches(const uint8_t* base, uint32_t address, uint32_t bytes, uint64_t fnv, const char* what) {
+  // The image is big-endian guest bytes, hashed as tools/guest_code_hash.py hashes the dumped image. Code lives in
+  // the XEX range (0x82000000-), which no host offset applies to.
+  uint64_t h = 0xCBF29CE484222325ull;
+  const uint8_t* p = base + address;
+  for (uint32_t i = 0; i < bytes; ++i) {
+    h ^= p[i];
+    h *= 0x100000001B3ull;
+  }
+  if (h != fnv) {
+    REXLOG_WARN("[hot] {}: the game code at {:08X} ({} bytes) is not the code the native was written from (FNV "
+                "{:016X}, expected {:016X}): left off",
+                what, address, bytes, h, fnv);
+    return false;
+  }
+  return true;
+}
+
+void StartReport() {
+  if (Natives().empty() || g_report_thread.joinable()) return;
+  g_report_stop = false;
+  g_report_thread = std::thread([] {
+    std::vector<uint64_t> last(Natives().size(), 0);
+    uint64_t last_checks = 0, last_check_ns = 0;
+    std::unique_lock<std::mutex> lock(g_report_mutex);
+    while (!g_report_cv.wait_for(lock, std::chrono::seconds(10), [] { return g_report_stop; })) {
+      std::string uses;
+      for (size_t i = 0; i < Natives().size(); ++i) {
+        const uint64_t now = Natives()[i]->uses.load(std::memory_order_relaxed);
+        if (now != last[i]) uses += fmt::format(" {} {};", Natives()[i]->key, now - last[i]);
+        last[i] = now;
+      }
+      const uint64_t checks = g_native_checks.load(std::memory_order_relaxed);
+      const uint64_t check_ns = g_native_check_ns.load(std::memory_order_relaxed);
+      if (!uses.empty() || checks != last_checks) {
+        // The time in guarded calls: the native on a copy, the rollback, the original and the comparison, summed
+        // over every thread (a guarded call of an audio mixing copy is on the audio thread's clock).
+        REXLOG_INFO("[hot] 10 s: native calls:{} | checks {} (total {}), {:.1f} ms in guarded calls, differences {}",
+                    uses.empty() ? " none" : uses, checks - last_checks, checks, (check_ns - last_check_ns) / 1e6,
+                    g_native_differences.load(std::memory_order_relaxed));
+      }
+      last_checks = checks;
+      last_check_ns = check_ns;
+      CodegenChecksReport(10);  // sa2-nx's CPU rounds: the generated code's self-checks and censuses (PC)
+    }
+  });
+}
+
+void StopReport() {
+  {
+    std::lock_guard<std::mutex> lock(g_report_mutex);
+    g_report_stop = true;
+  }
+  g_report_cv.notify_all();
+  if (g_report_thread.joinable()) g_report_thread.join();
+}
+
+void Apply() {
+  // Peggle 2's defaults first (anything the toml, command line or environment set wins), then the masters.
+  int defaulted = 0;
+  for (const Enhancement& e : kEnhancements) {
+    if (UnsetByUser(e.key) && !e.explicit_only) {
+      rex::cvar::SetFlagByName(e.key, e.on_value);
+      ++defaulted;
+    }
+  }
+  for (const Parameter& p : kParameters) {
+    if (UnsetByUser(p.key)) {
+      rex::cvar::SetFlagByName(p.key, p.value);
+    }
+  }
+  const bool cpu = REXCVAR_GET(peggle2_cpu_enhancements);
+  const bool noncpu = REXCVAR_GET(peggle2_noncpu_enhancements);
+  std::string line = fmt::format("[enhancements] masters: cpu {}, non-cpu {}; {} of {} keys not set by the toml, "
+                                 "environment or command line got Peggle 2's on value;",
+                                 cpu ? "on" : "OFF", noncpu ? "on" : "OFF", defaulted, std::size(kEnhancements));
+  for (const Enhancement& e : kEnhancements) {
+    const bool master = e.group == Group::kCpu ? cpu : noncpu;
+    std::string value = rex::cvar::GetFlagByName(e.key);
+    if (value.empty()) {
+      line += fmt::format(" {} not in this build;", e.name);
+      continue;
+    }
+    if (!master && !IsOff(e, value)) {
+      rex::cvar::SetFlagByName(e.key, e.off_value);
+      value = rex::cvar::GetFlagByName(e.key);
+    }
+    line += fmt::format(" {} {} ({} = {}{});", e.name, IsOff(e, value) ? "off" : "on", e.key, value,
+                        master ? "" : ", group master off");
+  }
+  // The natives (src/cpu/peggle2_hot_guest.cpp): CPU group, each with its own key (default on).
+  g_verify = REXCVAR_GET(peggle2_cpu_verify);
+  g_verify_mode = g_verify;
+  size_t natives_on = 0, natives_total = 0, ring_on = 0, ring_total = 0, gpu_on = 0, gpu_total = 0;
+  std::string natives_off, ring_off, gpu_off;
+  const bool natives = REXCVAR_GET(peggle2_cpu_natives);
+  for (Native* n : Natives()) {
+    // A renderer enhancement (PEGGLE2_RING_ENHANCEMENT) follows the CPU master, one of the non-CPU group
+    // (PEGGLE2_RING_GPU_ENHANCEMENT) the non-CPU master; a native the CPU and natives masters.
+    const bool master = n->gpu ? noncpu : (cpu && (n->ring || natives));
+    if (!master && n->own()) rex::cvar::SetFlagByName(n->key, "false");
+    n->active = n->own();
+    std::string& off = n->gpu ? gpu_off : n->ring ? ring_off : natives_off;
+    ++(n->gpu ? gpu_total : n->ring ? ring_total : natives_total);
+    if (n->active) {
+      ++(n->gpu ? gpu_on : n->ring ? ring_on : natives_on);
+    } else {
+      off += off.empty() ? n->key : std::string(", ") + n->key;
+    }
+  }
+  line += fmt::format(" natives {} of {} on{}; ring enhancements {} of {} on{}; renderer GPU enhancements {} of {} on{};",
+                      natives_on, natives_total, natives_off.empty() ? std::string() : " (off: " + natives_off + ")",
+                      ring_on, ring_total, ring_off.empty() ? std::string() : " (off: " + ring_off + ")", gpu_on,
+                      gpu_total, gpu_off.empty() ? std::string() : " (off: " + gpu_off + ")");
+  // Build time: code generation options (app/perf_overrides.toml: CR, CTR, XER and the non-volatile registers as C++
+  // locals), the same generated code for the PC and the Switch.
+  const std::string_view profile = PEGGLE2_CODEGEN_PROFILE;
+  // "+perf": tools/perf_codegen_post.py ran (direct calls, guest memory without volatile, loop barriers).
+  line += fmt::format(" build: codegen {} (registers as locals {}; direct calls + plain guest memory + loop barriers {})",
+                      profile, profile.starts_with("optimised") ? "on" : profile == "classic" ? "off" : "unknown",
+                      profile.find("+perf") != std::string_view::npos ? "on" : "off");
+  REXLOG_INFO("{}", line);
+  // sa2-nx's CPU rounds: the compare-and-swap key's run-time side and the PC self-checks, then the forms self-check.
+  CodegenChecksInit();
+  FormsSelfCheck();
+  for (const Enhancement& e : kEnhancements) {
+    REXLOG_DEBUG("[enhancements] {} ({}, {}): {}", e.name, e.group == Group::kCpu ? "cpu" : "non-cpu", e.key,
+                 e.what);
+  }
+  if (REXCVAR_GET(peggle2_cpu_verify)) {
+    rex::cvar::SetFlagByName("masseffect_native_verify_n", "2147483647");
+    rex::cvar::SetFlagByName("masseffect_native_fast_copy_verify", "2147483647");
+    REXLOG_INFO("[verify] verify mode ON: every self-check of the fast paths compares on every use (slower; test "
+                "sessions only). Look for \"[verify] ... differences: 0\" every 10 s (native renderer only)");
+  }
+}
+
+}  // namespace peggle2::enhancements
