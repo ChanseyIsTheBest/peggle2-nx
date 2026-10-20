@@ -10,6 +10,7 @@
 
 namespace rex::ui {
 class Presenter;
+struct RawImage;
 }
 
 // Frames the game has presented (counted by the hook on its D3DDevice_Swap, peggle2_frame_hooks.cpp); the recorder
@@ -20,6 +21,10 @@ namespace peggle2::capture {
 
 // Starts the recorder thread when peggle2_video_s > 0.
 void Start(std::function<rex::ui::Presenter*()> get_presenter);
+
+// The same with any frame source (Renut's renderer reads its presented frame back: renut::gpu::CaptureFrame).
+using Grabber = std::function<bool(rex::ui::RawImage&)>;
+void StartGrabber(Grabber grab);
 
 // Stops it (writes what it has, if anything).
 void Stop();

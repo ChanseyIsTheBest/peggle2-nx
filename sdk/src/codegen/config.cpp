@@ -13,6 +13,7 @@
 // TOML config file loading
 
 #include <algorithm>
+#include <cstdio>
 #include <map>
 #include <set>
 
@@ -117,8 +118,12 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
             hasBool("fp_mode_lookahead_past_branch"), "fp_mode_lookahead_past_branch");
   MergeBool(cfg.rotateWordNarrow, toml["rotate_word_narrow"].value_or(false), hasBool("rotate_word_narrow"),
             "rotate_word_narrow");
+  MergeBool(cfg.rotateWordShifts, toml["rotate_word_shifts"].value_or(false), hasBool("rotate_word_shifts"),
+            "rotate_word_shifts");
   MergeBool(cfg.fctiInline, toml["fcti_inline"].value_or(false), hasBool("fcti_inline"), "fcti_inline");
   MergeBool(cfg.fpCopyPairs, toml["fp_copy_pairs"].value_or(false), hasBool("fp_copy_pairs"), "fp_copy_pairs");
+  MergeBool(cfg.fpCopyForwarding, toml["fp_copy_forwarding"].value_or(false), hasBool("fp_copy_forwarding"),
+            "fp_copy_forwarding");
   MergeBool(cfg.fpCopyOnlyFunctions, toml["fp_copy_only_functions"].value_or(false),
             hasBool("fp_copy_only_functions"), "fp_copy_only_functions");
   MergeBool(cfg.dcbtPrefetch, toml["dcbt_prefetch"].value_or(false), hasBool("dcbt_prefetch"), "dcbt_prefetch");
@@ -136,6 +141,8 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
             hasBool("non_argument_as_local"), "non_argument_as_local");
   MergeBool(cfg.nonVolatileRegistersAsLocalVariables, toml["non_volatile_as_local"].value_or(false),
             hasBool("non_volatile_as_local"), "non_volatile_as_local");
+  MergeBool(cfg.setjmpSaveLocals, toml["setjmp_save_locals"].value_or(false), hasBool("setjmp_save_locals"),
+            "setjmp_save_locals");
   MergeBool(cfg.generateExceptionHandlers, toml["generate_exception_handlers"].value_or(false),
             hasBool("generate_exception_handlers"), "generate_exception_handlers");
   MergeBool(cfg.argsInRegisters, toml["args_in_registers"].value_or(false), hasBool("args_in_registers"),
@@ -442,6 +449,44 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
         cfg.nonArgumentKeep.insert(static_cast<uint32_t>(*addr));
       else
         REXCODEGEN_ERROR("non_argument_as_local_keep: expected function addresses ({})", filePath);
+    }
+  }
+
+  // non_volatile_as_local_exclude -> nonVolatileLocalExclude: [[start, end], ...] (banjo-nx)
+  if (auto excludeArray = toml["non_volatile_as_local_exclude"].as_array()) {
+    for (auto& entry : *excludeArray) {
+      auto* range = entry.as_array();
+      if (!range || range->size() != 2 || !(*range)[0].value<int64_t>() || !(*range)[1].value<int64_t>()) {
+        REXCODEGEN_ERROR("non_volatile_as_local_exclude: expected [start, end] pairs ({})", filePath);
+        continue;
+      }
+      cfg.nonVolatileLocalExclude.emplace_back(static_cast<uint32_t>(*(*range)[0].value<int64_t>()),
+                                               static_cast<uint32_t>(*(*range)[1].value<int64_t>()));
+    }
+  }
+
+  // non_volatile_as_local_keep -> nonVolatileKeep*: ["v64-v77", "v92", "r30", ...] (banjo-nx)
+  if (auto keepRegs = toml["non_volatile_as_local_keep"].as_array()) {
+    for (auto& entry : *keepRegs) {
+      auto text = entry.value<std::string>();
+      unsigned first = 0, last = 0;
+      char kind = 0, kind2 = 0;
+      int n = text ? std::sscanf(text->c_str(), "%c%u-%c%u", &kind, &first, &kind2, &last) : 0;
+      if (n == 2)
+        last = first;
+      if ((n != 2 && n != 4) || (n == 4 && kind2 != kind) || last < first ||
+          (kind != 'r' && kind != 'f' && kind != 'v') || last >= (kind == 'v' ? 128u : 32u)) {
+        REXCODEGEN_ERROR("non_volatile_as_local_keep: expected \"rN\", \"fN\", \"vN\" or \"vA-vB\" ({})", filePath);
+        continue;
+      }
+      for (unsigned i = first; i <= last; ++i) {
+        if (kind == 'r')
+          cfg.nonVolatileKeepR |= 1u << i;
+        else if (kind == 'f')
+          cfg.nonVolatileKeepF |= 1u << i;
+        else
+          cfg.nonVolatileKeepV[i / 64] |= uint64_t(1) << (i % 64);
+      }
     }
   }
 

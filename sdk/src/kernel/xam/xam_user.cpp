@@ -279,8 +279,12 @@ uint32_t XamUserReadProfileSettingsEx(uint32_t title_id, uint32_t user_index, ui
   // Title ID = 0 means us.
   // 0xfffe07d1 = profile?
 
-  if (!xuids && user_index) {
-    // Only support user 0.
+  // peggle2-nx (2026-10-20): a guest reads the profile's settings, as a guest on the console gets settings. Without
+  // them Peggle 2 made no game profile for a guest (its sign-in handler reads every signed-in user's settings), and in a
+  // local duel player 2's turns then took player 1's controller (player 2's own did nothing; the lobby, which reads
+  // the controllers directly, worked).
+  if (!xuids && user_index && !IsGuest(user_index)) {
+    // Only support user 0 (and its guests).
     if (overlapped) {
       REX_KERNEL_STATE()->CompleteOverlappedImmediate(
           REX_KERNEL_MEMORY()->HostToGuestVirtual(overlapped), X_ERROR_NO_SUCH_USER);

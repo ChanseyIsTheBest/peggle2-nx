@@ -8,7 +8,10 @@
 //   - the census of indirect calls (peggle2_diag_indirect_census = a file): per call site how often it ran and where to,
 //     the input of tools/indirect_promotions.py;
 //   - the SDK's kernel_critsec_pcr_owner: every critical section call compares the owner id it took from the PCR
-//     with the looked-up thread's (rex/sys_counters.h, kCensusCritSecOwnerMismatch).
+//     with the looked-up thread's (rex/sys_counters.h, kCensusCritSecOwnerMismatch);
+//   - banjo-nx's codegen round (2026-10-19): tools/lr_preserve.py's link-register write-backs proven redundant
+//     (REX_LR_WRITE_SAME_CHECK: compared with ctx.lr, RexLrWriteMismatch) and tools/r1_local.py's r1 mirror after
+//     assumed calls (REX_R1_CHECK: compared with ctx.r1, RexR1Mismatch); ro_constants_cfg.py's folds use RexRoMismatch.
 // So every PC run tests what it executes; the '[verify]' lines of the 10 s report carry the counts.
 #include "peggle2_enhancements.h"
 
@@ -67,6 +70,10 @@ volatile unsigned long long g_rex_diet_census[6] = {};
 volatile unsigned long long g_rex_ro_checked = 0;      // plain lossy counts: "at least this many"
 volatile unsigned long long g_rex_promoted_calls = 0;
 unsigned char g_rex_indirect_census = 0;
+// banjo-nx's codegen round (2026-10-19): tools/r1_local.py (the r1 mirror after kept or assumed calls, REX_R1_CHECK)
+// and tools/lr_preserve.py --rewrite (link-register write-backs proven redundant, REX_LR_WRITE_SAME_CHECK).
+volatile unsigned long long g_rex_r1_checked = 0;
+volatile unsigned long long g_rex_lr_write_checked = 0;
 }
 
 namespace {
@@ -74,6 +81,8 @@ namespace {
 std::atomic<uint64_t> g_flush_flow_mismatches{0};
 std::atomic<uint64_t> g_ro_mismatches{0};
 std::atomic<uint64_t> g_promoted_mismatches{0};
+std::atomic<uint64_t> g_r1_mismatches{0};
+std::atomic<uint64_t> g_lr_write_mismatches{0};
 
 // One call site: (function address << 32) | ordinal. Up to four targets are told apart; the rest is "other".
 struct Site {
@@ -106,6 +115,29 @@ extern "C" void RexRoMismatch(unsigned address) noexcept {
     REXLOG_ERROR("[enh] DIFFERENCE: read-only constants: guest memory at {:08X} does not hold the constant the "
                  "generated code uses",
                  address);
+  }
+}
+
+// tools/r1_local.py (from banjo-nx): after a call whose callee is only assumed (or proven) to return with r1 unchanged,
+// the local mirror differs from ctx.r1: a callee moved the guest stack pointer. Counted, reported; the mirror is
+// reloaded by the macro.
+extern "C" void RexR1Mismatch(unsigned long long expected, unsigned long long got) noexcept {
+  ::peggle2::enhancements::VerifyDifference();
+  if (g_r1_mismatches.fetch_add(1, std::memory_order_relaxed) < 16) {
+    REXLOG_ERROR("[enh] DIFFERENCE: r1 mirror: a callee returned with r1 {:#x}, the caller's mirror holds {:#x} "
+                 "(return address {})",
+                 got, expected, static_cast<const void*>(__builtin_return_address(0)));
+  }
+}
+
+// tools/lr_preserve.py --rewrite (from banjo-nx): a link-register write-back proven to store the value ctx.lr already
+// holds did not. The macro writes it after the report, as the original does.
+extern "C" void RexLrWriteMismatch(unsigned long long held, unsigned long long written) noexcept {
+  ::peggle2::enhancements::VerifyDifference();
+  if (g_lr_write_mismatches.fetch_add(1, std::memory_order_relaxed) < 16) {
+    REXLOG_ERROR("[enh] DIFFERENCE: link-register write-back proven redundant: ctx.lr {:#x}, the epilogue writes "
+                 "{:#x} (return address {})",
+                 held, written, static_cast<const void*>(__builtin_return_address(0)));
   }
 }
 
@@ -182,6 +214,11 @@ void CodegenChecksReport(int seconds) {
     REXLOG_INFO("[census] guest code per second: {:.0f} flush-mode switches (each an msr fpcr on the console; "
                 "{:.0f} of them unconditional writes that left the mode as it was)",
                 flush, flush_same);
+    // The rounding mode of the guest's FPSCR writes, cumulative (from banjo-nx: tools/fp_sign_ops.py is exact only
+    // while the game never selects round-up / round-down; rex/ppc/context.h counts each write's mode).
+    REXLOG_INFO("[census] FPSCR rounding mode written by the guest (cumulative): to nearest {}, toward zero {}, up or "
+                "down {}",
+                CensusRead(kCensusRoundNearest), CensusRead(kCensusRoundZero), CensusRead(kCensusRoundUpDown));
     {
       static uint64_t last_proven = 0;
       const uint64_t proven_now = g_rex_flush_flow_checked;
@@ -250,6 +287,20 @@ void CodegenChecksReport(int seconds) {
       REXLOG_INFO("[verify] generated-code self-checks so far: {} loads folded to read-only constants, {} promoted "
                   "indirect calls, {} critical section owners from the PCR; 0 differences",
                   ro, promoted, pcr);
+    }
+  }
+  {  // banjo-nx's codegen round: tools/r1_local.py and tools/lr_preserve.py
+    const uint64_t r1 = g_rex_r1_checked, lr = g_rex_lr_write_checked;
+    const uint64_t r1_wrong = g_r1_mismatches.load(std::memory_order_relaxed);
+    const uint64_t lr_wrong = g_lr_write_mismatches.load(std::memory_order_relaxed);
+    if (r1_wrong || lr_wrong) {
+      REXLOG_ERROR("[enh] DIFFERENCE: generated-code self-checks (cumulative): r1 mirror {} of {} wrong, redundant "
+                   "link-register write-backs {} of {} wrong",
+                   r1_wrong, r1, lr_wrong, lr);
+    } else if (r1 || lr) {
+      REXLOG_INFO("[verify] r1 mirror checked after {} calls, {} link-register write-backs proven redundant checked; "
+                  "0 differences",
+                  r1, lr);
     }
   }
   if (!g_rex_indirect_census) return;

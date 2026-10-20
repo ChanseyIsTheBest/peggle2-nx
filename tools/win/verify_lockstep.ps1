@@ -39,6 +39,8 @@ if (-not $SkipVerify) {
 }
 if (-not $SkipLockstep) {
     Use-Seed 'lockstep'
+    # 2026-10-20: peggle2_fps is 60 by default now; the baselines were recorded at 30.
+    $env:REX_PEGGLE2_FPS = '30'
     $env:REX_VBLANK_PER_SWAP = 'true'; $env:REX_VBLANK_PER_SWAP_COUNT = '2'; $env:REX_CLOCK_PER_SWAP_HZ = '30'
     powershell -NoProfile -ExecutionPolicy Bypass -File tools\win\boot_test.ps1 -Seconds 150 -InputScript $script -VideoFromFrame 1000 -VideoFrames 400 -Tail 1 | Select-Object -First 1
     # Disk space (the user's request, relayed 2026-10-13): only the run's frame hashes are kept under its name; the raw
@@ -46,6 +48,7 @@ if (-not $SkipLockstep) {
     python tools\compare_hashes.py --hash out\pc\captures\video_f1000.rgba
     foreach ($e in 'hash', 'frames', 'txt') { Copy-Item -Force "out\pc\captures\video_f1000.$e" "out\pc\captures\video_f1000_ls_$Name.$e" }
     $env:REX_VBLANK_PER_SWAP = $null; $env:REX_VBLANK_PER_SWAP_COUNT = $null; $env:REX_CLOCK_PER_SWAP_HZ = $null
+    $env:REX_PEGGLE2_FPS = $null
     $f = (Get-ChildItem out\pc\logs\peggle2_*.log | Sort-Object LastWriteTime | Select-Object -Last 1).FullName
     "LOCKSTEP LOG $f"
     $c = 'out\pc\captures\video_f1000_'

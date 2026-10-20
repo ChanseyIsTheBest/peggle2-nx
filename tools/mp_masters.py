@@ -17,7 +17,9 @@ lobby"). Two places of the recompiled lobby get a call; with the key off both ca
    own entries: the same for numbers 5 and 6 with the placeholders peggle2_mp_placeholder returns (0 = none).
 
   python tools/mp_masters.py [--gen app/generated/default] [--check]
-Idempotent. Last in tools/post_codegen.py (it reads the text the other steps leave).
+Idempotent. In tools/post_codegen.py right after leaf_locals.py (it reads the text the steps up to there leave)
+and before banjo-nx's analyses: they take a function with its `// peggle2-nx:` line for opaque
+(tools/leaf_dead_stores.py, OPAQUE_MARK), so this step must write that line in every function it changes.
 """
 import glob
 import os

@@ -13,6 +13,7 @@
 #include "helpers.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 #include <rex/codegen/binary_view.h>
 #include <rex/logging.h>
@@ -49,7 +50,37 @@ const FunctionGraph& BuilderContext::graph() const {
 // Localizing a non-volatile assumes the function owns it across its whole body.
 // An SEH funclet does not: it inherits its owner's live registers through ctx.
 bool BuilderContext::localizeNonVolatiles() const {
-  return config().nonVolatileRegistersAsLocalVariables && !fn.sharesRegisters();
+  return config().nonVolatileRegistersAsLocalVariables && !fn.sharesRegisters() && !keepsNonVolatilesInCtx();
+}
+
+// banjo-nx: a __save*/__rest* helper (__savegprlr_N: rN..r31, __savefpr_N: fN..f31, __savevmx_N: vN..v31 or
+// vN..v127) whose range covers a non_volatile_as_local_keep register: that register lives in ctx, so the call stays.
+bool BuilderContext::helperCoversKeptRegister(const std::string& name) const {
+  const auto& cfg = config();
+  if (!cfg.nonVolatileKeepR && !cfg.nonVolatileKeepF && !cfg.nonVolatileKeepV[0] && !cfg.nonVolatileKeepV[1])
+    return false;
+  size_t us = name.rfind('_');
+  if (us == std::string::npos)
+    return false;
+  unsigned n = static_cast<unsigned>(std::strtoul(name.c_str() + us + 1, nullptr, 10));
+  char kind = name.find("gprlr") != std::string::npos ? 'r' : name.find("fpr") != std::string::npos ? 'f' : 'v';
+  unsigned last = (kind == 'v' && n >= 64) ? 127 : 31;
+  for (unsigned i = n; i <= last; ++i)
+    if (cfg.nonVolatileKept(kind, i))
+      return true;
+  return false;
+}
+
+// banjo-nx: non_volatile_as_local_exclude: the function keeps its non-volatiles in ctx and calls the save/restore
+// helpers, whose bodies therefore work on ctx as well (a localized function never calls them). peggle2-nx
+// (2026-10-19): the helper bodies only when something can call them (RecompilerConfig::nonVolatileHelpersCalled);
+// otherwise they are dead code and generated as before the port.
+bool BuilderContext::keepsNonVolatilesInCtx() const {
+  const auto& cfg = config();
+  if (cfg.nonVolatileLocalExcluded(fn.base()))
+    return true;
+  const auto& name = fn.name();
+  return cfg.nonVolatileHelpersCalled() && (name.rfind("__save", 0) == 0 || name.rfind("__rest", 0) == 0);
 }
 
 // Same for r0, r2, r11, r12, f0 and v32-v63 (non_argument_as_local). A share_registers callee (an SEH
@@ -64,7 +95,8 @@ bool BuilderContext::localizeNonArguments() const {
 
 // sa2-nx: non_argument_as_local_keep, and the save/restore helpers: __savegprlr_N / __savefpr_N store the
 // r12 their caller set up (the LR or a frame address), __restfpr_N and the vector helpers address through
-// r12 (and r11). Their calls are elided with non_volatile_as_local; without it they are real calls that
+// r12 (and r11). Their calls are elided with non_volatile_as_local (except in a non_volatile_as_local_exclude
+// function, or for a helper covering a non_volatile_as_local_keep register); otherwise they are real calls that
 // must find these arguments in ctx.
 bool BuilderContext::keepsNonArgumentsInCtx(const FunctionNode& function) const {
   const auto& name = function.name();
@@ -74,7 +106,7 @@ bool BuilderContext::keepsNonArgumentsInCtx(const FunctionNode& function) const 
 
 std::string BuilderContext::r(size_t index) {
   if ((localizeNonArguments() && (index == 0 || index == 2 || index == 11 || index == 12)) ||
-      (localizeNonVolatiles() && index >= 14)) {
+      (localizeNonVolatiles() && index >= 14 && !config().nonVolatileKept('r', index))) {
     locals.r[index] = true;
     return fmt::format("r{}", index);
   }
@@ -82,7 +114,8 @@ std::string BuilderContext::r(size_t index) {
 }
 
 std::string BuilderContext::f(size_t index) {
-  if ((localizeNonArguments() && index == 0) || (localizeNonVolatiles() && index >= 14)) {
+  if ((localizeNonArguments() && index == 0) ||
+      (localizeNonVolatiles() && index >= 14 && !config().nonVolatileKept('f', index))) {
     locals.f[index] = true;
     return fmt::format("f{}", index);
   }
@@ -91,7 +124,8 @@ std::string BuilderContext::f(size_t index) {
 
 std::string BuilderContext::v(size_t index) {
   if ((localizeNonArguments() && (index >= 32 && index <= 63)) ||
-      (localizeNonVolatiles() && ((index >= 14 && index <= 31) || (index >= 64 && index <= 127)))) {
+      (localizeNonVolatiles() && ((index >= 14 && index <= 31) || (index >= 64 && index <= 127)) &&
+       !config().nonVolatileKept('v', index))) {
     locals.v[index] = true;
     return fmt::format("v{}", index);
   }
@@ -208,6 +242,19 @@ void BuilderContext::emit_function_call(uint32_t address) {
   if (address == cfg.setJmpAddress) {
     // Save PPCContext for restoration after longjmp
     println("\t{} = ctx;", env());
+    if (cfg.setjmpSaveLocals) {
+      // setjmp_save_locals (sa2-nx, via banjo-nx): registers kept in C++ locals (cr/ctr/xer_as_local,
+      // non_volatile_as_local, ...) are not in ctx: copy them into env as well and take them back after a longjmp.
+      // The guest's longjmp gives the setjmp caller its registers as they were at the setjmp; C++ leaves a local that
+      // changed in between indeterminate. The full set of locals is known only at the end of the function, so
+      // FunctionGraph fills in the markers.
+      println("\t{}", kSetjmpSaveLocalsMarker);
+      // Use custom ppc_setjmp that uses guest address as key
+      println("\t{}.s64 = ppc_setjmp({}.u32);", temp(), r(3));
+      println("\tif ({}.s64 != 0) {{ ctx = {}; {} }}", temp(), env(), kSetjmpRestoreLocalsMarker);
+      println("\t{} = {};", r(3), temp());
+      return;
+    }
     // Use custom ppc_setjmp that uses guest address as key
     println("\t{}.s64 = ppc_setjmp({}.u32);", temp(), r(3));
     // Restore PPCContext if returning from longjmp
@@ -223,11 +270,12 @@ void BuilderContext::emit_function_call(uint32_t address) {
       const auto& name = targetFn->name();
 
       // Handle save/restore helpers. Gated on the global setting, not this
-      // function's: the helper bodies are emitted under it too, so once they
-      // spill to locals they are no-ops that scribble zeros on the caller's
-      // frame. A share_registers function still has to elide them.
-      if (cfg.nonVolatileRegistersAsLocalVariables &&
-          (name.find("__rest") == 0 || name.find("__save") == 0)) {
+      // function's localization: a share_registers function still elides them
+      // (it works on its owner's frame). Only a non_volatile_as_local_exclude
+      // function calls them, and a helper that covers a non_volatile_as_local_keep
+      // register is called (banjo-nx); the helper bodies keep ctx then.
+      if (cfg.nonVolatileRegistersAsLocalVariables && !keepsNonVolatilesInCtx() &&
+          (name.find("__rest") == 0 || name.find("__save") == 0) && !helperCoversKeptRegister(name)) {
         // print nothing - these are handled by local variable tracking
         return;
       }
@@ -522,10 +570,21 @@ bool IsPlainIntegerInstruction(const ppc_insn& insn) {
 // must be an lfs / lfsx of it; before that only other lfs / lfsx / stfs / stfsx (they write their own register or
 // none) and plain integer instructions. No label after the load up to the store (a jump would arrive without the
 // load), no mid-asm hook from the load to the store (it could change the register).
-uint32_t FloatCopyLoadOf(const BuilderContext& ctx, uint32_t store, const uint32_t* storeData) {
+//
+// banjo-nx (fp_copy_forwarding): other instructions may stand between as well, unless they write the store's register
+// or branch; an fneg / fabs / fnabs of the register in place is followed through, and `sign` receives what the
+// sign operations do to the single's bits: (bits & keep) ^ flip.
+bool StartsWith(std::string_view name, std::string_view prefix) {
+  return name.substr(0, prefix.size()) == prefix;
+}
+
+uint32_t FloatCopyLoadOf(const BuilderContext& ctx, uint32_t store, const uint32_t* storeData,
+                         FloatCopySign* sign = nullptr) {
   if (!ctx.config().fpCopyPairs || ctx.labels == nullptr) {
     return 0;
   }
+  const bool forwarding = ctx.config().fpCopyForwarding;
+  FloatCopySign ops;
   ppc_insn self;
   rex::codegen::ppc::Disassemble(storeData, 4, store, self);
   const auto& hooks = ctx.config().midAsmHooks;
@@ -550,7 +609,39 @@ uint32_t FloatCopyLoadOf(const BuilderContext& ctx, uint32_t store, const uint32
     rex::codegen::ppc::Disassemble(p, 4, address, previous);
     if (IsSingleLoad(previous)) {
       if (previous.operands[0] == self.operands[0]) {
+        if (sign) {
+          *sign = ops;
+        }
         return address;  // a label AT the load is fine: whoever jumps there runs the load
+      }
+    } else if (forwarding) {
+      if (previous.opcode == nullptr || previous.opcode->name == nullptr) {
+        return 0;
+      }
+      const std::string_view name = previous.opcode->name;
+      if (StartsWith(name, "b") || StartsWith(name, "sc") || StartsWith(name, "tw") || StartsWith(name, "td")) {
+        return 0;
+      }
+      // The instructions that write a float register write their first operand: every f* but the compares, every
+      // lf*, mffs. (Stores, mtfsf / mtfsb, vector and integer instructions write none.)
+      const bool fpr_write =
+          (StartsWith(name, "f") && !StartsWith(name, "fcmp")) || StartsWith(name, "lf") || StartsWith(name, "mffs");
+      if (fpr_write && previous.operands[0] == self.operands[0]) {
+        uint32_t keep, flip;
+        if (StartsWith(name, "fneg")) {
+          keep = 0xFFFFFFFFu, flip = 0x80000000u;
+        } else if (StartsWith(name, "fabs")) {
+          keep = 0x7FFFFFFFu, flip = 0;
+        } else if (StartsWith(name, "fnabs")) {
+          keep = 0x7FFFFFFFu, flip = 0x80000000u;
+        } else {
+          return 0;
+        }
+        if (previous.operands[1] != self.operands[0]) {
+          return 0;  // from another register
+        }
+        // This operation comes before the ones found so far: those apply to its result.
+        ops = FloatCopySign{keep & ops.keep, (flip & ops.keep) ^ ops.flip};
       }
     } else if (!IsSingleStore(previous) && !IsPlainIntegerInstruction(previous)) {
       return 0;
@@ -561,16 +652,43 @@ uint32_t FloatCopyLoadOf(const BuilderContext& ctx, uint32_t store, const uint32
   }
   return 0;
 }
+
+// fp_copy_forwarding (banjo-nx): whether a store after the load at `load` in its block writes the bits it loads (the
+// store's own test, FloatCopyLoadOf, names this load).
+bool FeedsCopyStore(const BuilderContext& ctx, uint32_t load, const uint32_t* loadData) {
+  uint32_t end = 0;
+  for (const auto& block : ctx.fn.blocks()) {
+    if (load >= block.base && load < block.end()) {
+      end = block.end();
+      break;
+    }
+  }
+  const uint32_t* p = loadData + 1;
+  for (uint32_t address = load + 4, n = 0; address < end && n < kFloatCopyReach; address += 4, ++p, ++n) {
+    ppc_insn next;
+    rex::codegen::ppc::Disassemble(p, 4, address, next);
+    if (IsSingleStore(next) && FloatCopyLoadOf(ctx, address, p) == load) {
+      return true;
+    }
+  }
+  return false;
+}
 }  // namespace
 
 bool BuilderContext::float_copy_pair_load() const {
-  return config().fpCopyPairs && IsSingleLoad(insn) && !has_mid_asm_hook() && float_copy_pair_pays();
+  if (!config().fpCopyPairs || !IsSingleLoad(insn) || has_mid_asm_hook()) {
+    return false;
+  }
+  // fp_copy_forwarding: also whenever one of its stores takes the form (they need the bits local).
+  return float_copy_pair_pays() || (config().fpCopyForwarding && FeedsCopyStore(*this, base, data));
 }
 
-bool BuilderContext::float_copy_pair_store() const {
+bool BuilderContext::float_copy_pair_store(FloatCopySign* sign) const {
   // Its load took the copy form: the tracked mode can only have become FPU between the two (nothing there sets
-  // VMX mode or forgets the mode), and then this store does not take the form either.
-  return config().fpCopyPairs && float_copy_pair_pays() && FloatCopyLoadOf(*this, base, data) != 0;
+  // VMX mode or forgets the mode), and then this store does not take the form either. fp_copy_forwarding: any mode;
+  // the load takes the form because this store names it (FeedsCopyStore).
+  return config().fpCopyPairs && (float_copy_pair_pays() || config().fpCopyForwarding) &&
+         FloatCopyLoadOf(*this, base, data, sign) != 0;
 }
 
 void BuilderContext::emit_flush_mode_for_modeless() {

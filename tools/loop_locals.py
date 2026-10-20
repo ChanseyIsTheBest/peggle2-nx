@@ -48,6 +48,24 @@ import os
 import re
 import sys
 
+# From banjo-nx (2026-10-16, marathon-nx's proposal 3; peggle2-nx 2026-10-19): functions whose A57 code is cheaper
+# without these locals, measured on the compiled code by tools/locals_choice.py (app/config/locals_optout.txt,
+# "<loop|leaf> <name>" per line). They keep their ctx registers; a change of the list needs a fresh codegen (the tools
+# never undo a function they already converted). app/config, not app/: the analyses that read every address the
+# port's sources and app/*.txt name (tools/leaf_dead_stores.py) would take the list's functions for hooked ones.
+OPTOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app', 'config', 'locals_optout.txt')
+
+
+def read_optout(kind, path=OPTOUT):
+    names = set()
+    if os.path.isfile(path):
+        for line in open(path, encoding='utf-8'):
+            parts = line.split('#', 1)[0].split()
+            if len(parts) == 2 and parts[0] == kind:
+                names.add(parts[1])
+    return names
+
+
 FUNC = re.compile(r'^DEFINE_REX_FUNC\((\w+)\) \{$')
 LABEL = re.compile(r'^(loc_[0-9A-F]{8}):\s*$')
 GOTO = re.compile(r'\bgoto (loc_[0-9A-F]{8});')
@@ -276,6 +294,8 @@ def main():
         sys.exit('ERROR (post-codegen patch): loop_locals: no *_recomp.N.cpp or no single *_pch.h in %s' % a.gen)
     c = Counts()
     changed = 0
+    optout = read_optout('loop')
+    opted_out = 0
     for f in files:
         path = os.path.join(a.gen, f)
         lines = open(path, encoding='utf-8').read().split('\n')
@@ -284,7 +304,8 @@ def main():
         i = 0
         while i < len(lines):
             out.append(lines[i])
-            if not FUNC.match(lines[i]):
+            func = FUNC.match(lines[i])
+            if not func:
                 i += 1
                 continue
             j = i + 1
@@ -294,7 +315,9 @@ def main():
             i = j
             code_text = '\n'.join(l for l in body if is_code(l))
             new = None
-            if LEAF_CALL.search(code_text) and 'setjmp' not in code_text and 'longjmp' not in code_text and \
+            if func.group(1) in optout:
+                opted_out += 1
+            elif LEAF_CALL.search(code_text) and 'setjmp' not in code_text and 'longjmp' not in code_text and \
                     any(l.strip() == 'REX_FUNC_PROLOGUE();' for l in body):
                 new = convert(body, c)
             if new is None:
@@ -323,9 +346,10 @@ def main():
             open(pch, 'w', encoding='utf-8', newline='\n').write(text)
     print('loop_locals%s: %d call-free loop regions in %d functions keep %d registers in locals (%d only read: not '
           'written back; %d border stubs), %d loops already done; left alone: %d loops with a call, %d with a name '
-          'this script does not know, %d regions that use no ctx register, %d entered from below; %d files changed' %
+          'this script does not know, %d regions that use no ctx register, %d entered from below; %d functions on the '
+          'opt-out list; %d files changed' %
           (' (check only)' if a.check else '', c.done, c.functions, c.registers, c.read_only, c.stubs, c.already,
-           c.with_call, c.unknown_name, c.no_regs, c.from_below, changed))
+           c.with_call, c.unknown_name, c.no_regs, c.from_below, opted_out, changed))
     if a.stats and c.unknown:
         print('  names that kept a loop out: ' +
               ', '.join('%s (%d)' % kv for kv in sorted(c.unknown.items(), key=lambda kv: -kv[1])[:20]))

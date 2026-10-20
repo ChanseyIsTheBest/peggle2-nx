@@ -71,15 +71,32 @@ input_joycon_sideways = true
 # input_p2_lb = "L, SL"         # player 2: L or SL is the left bumper
 # input_p3_start = "PLUS, MINUS"
 
-# Renderer: the native Vulkan renderer (PM4 ring -> NVK). It needs peggle2_shaders.mesp (+ .idx) next to the NRO,
-# built from your own game files (tools/build_shader_library.sh). false = ReXGlue's emulated Xenos GPU: the reference
-# image, but far too slow on the console.
-masseffect_renderer_native = true
-gpu_plugin = "xenos"
+{renderer}
 
 {log}
 """
-LOG_ON = '# Logs go to logs/ next to the NRO. Please keep them after a test run.\nlog_level = "info"'
+RENDERER_NATIVE = """# Renderer: the native Vulkan renderer (PM4 ring -> NVK). It needs peggle2_shaders.mesp (+ .idx) next to the NRO,
+# built from your own game files (tools/build_shader_library.sh). false = ReXGlue's emulated Xenos GPU: the reference
+# image, but far too slow on the console. An NRO built without the Vulkan driver (development builds since
+# 2026-10-20) ignores these two lines and runs Renut's renderer on deko3d (deko3d_glsl.bin next to the NRO).
+masseffect_renderer_native = true
+gpu_plugin = "xenos\""""
+# 2026-10-20 (the user: "a fully functional deko 3d native renderer with no ring emulation or edram emulation"):
+# Renut's Direct3D-level renderer (reNut by masterspike52, as banjo-nx carries it), on deko3d.
+RENDERER_RENUT = """# Renderer: Renut's Direct3D-level renderer on deko3d (reNut by masterspike52, through banjo-nx): the game's
+# Direct3D calls are drawn directly, with no PM4 ring and no EDRAM model. The game's own shaders come from
+# deko3d_glsl.bin next to the NRO (the web installer makes it from your game files); the shader variants it compiles
+# are kept in deko3d_shaders.bin there (copy the one that comes with the build to skip the first compiles). It
+# follows peggle2_render_height_handheld / _docked and shows the HD atlases as the native renderer does.
+# peggle2_renderer = "native" goes back to the native renderer, in an NRO that has the Vulkan driver (development
+# builds since 2026-10-20 have none: Renut's renderer always).
+peggle2_renderer = "renut"
+renut_gpu_backend = "deko3d"
+masseffect_renderer_native = false"""
+# 2026-10-20: log_to_file too. The NRO's built-in settings (since 1.0.0) have log_to_file = false, so a config that only
+# set the level wrote no file (seen in an emulator run of peggle2_renut_deko3d.toml: no logs/ folder at all).
+LOG_ON = ('# Logs go to logs/ next to the NRO. Please keep them after a test run.\nlog_level = "info"\n'
+          'log_to_file = true')
 # Asked for on 2026-10-14 ("a config with no logging"): "off" is a level of the SDK's log_level. stderr stays
 # redirected to logs/rex/rex_stderr.log (sdk/src/ui/switch_crash_hooks.c: a few lines of the graphics driver at
 # start) and a crash still writes rex_crash.log. Use it to play; for a fault, switch back to a config with logs.
@@ -104,9 +121,16 @@ RELEASE_DEFAULTS_HEAD = """# peggle2-nx: the Switch build's fixed settings, comp
 # The full game (XBLA titles ask the console for their licence).
 license_mask = 1
 
-# The native Vulkan renderer with the shader library made from the game files (peggle2_shaders.mesp).
-masseffect_renderer_native = true
-gpu_plugin = "xenos"
+# Renut's Direct3D-level renderer on deko3d (reNut by masterspike52, through banjo-nx): no PM4 ring, no EDRAM model.
+# The game's own shaders come from deko3d_glsl.bin beside the NRO (the web installer makes it from the game files).
+# The NRO has no Vulkan driver, so this is its only renderer.
+peggle2_renderer = "renut"
+renut_gpu_backend = "deko3d"
+masseffect_renderer_native = false
+
+# 60 pictures a second (the user's choice of 2026-10-20: the deko3d renderer leaves the room); the player's
+# peggle2.toml chooses (30 = as the Xbox 360 game).
+peggle2_fps = 60
 
 # No log: no log lines, no log file, no logs/ folder (a crash still writes logs/rex/rex_crash.log), and no console
 # profile file.
@@ -144,9 +168,9 @@ peggle2_noncpu_enhancements = true
 RELEASE_PLAYER = """# Peggle 2 for the Nintendo Switch: your settings. The game writes this file when there is none; delete it to get
 # the defaults back. Everything else is built into peggle2.nro.
 
-# Pictures a second: 30 = as the Xbox 360 game, 60 = a picture every screen refresh. The game runs at the same speed
+# Pictures a second: 60 = a picture every screen refresh, 30 = as the Xbox 360 game. The game runs at the same speed
 # either way (60 logic steps a second); 60 needs more of the console and is not reached everywhere.
-peggle2_fps = 30
+peggle2_fps = 60
 
 # Language: "en", "de", "fr", "es", "it" or "pt" (Brazilian Portuguese). Empty = English.
 peggle2_language = ""
@@ -275,7 +299,8 @@ def profiler_section(profiling):
 def write(path, title, extra, rows, cpu_on, tail='', overrides=None, profiling=PROFILING):
     overrides = overrides or {}
     n_cpu = sum(r['cpu'] for r in rows)
-    text = HEADER.format(title=title, extra=extra, fps=overrides.get('peggle2_fps', '30'),
+    text = HEADER.format(title=title, extra=extra, fps=overrides.get('peggle2_fps', '60'),
+                         renderer=RENDERER_RENUT if overrides.get('renderer') == 'renut' else RENDERER_NATIVE,
                          log=LOG_OFF if overrides.get('log_level') == 'off' else LOG_ON)
     text += profiler_section(profiling)
     text += f"""
@@ -319,12 +344,12 @@ def main():
         # on build": peggle2_all_on_dlc.toml with log_level = "off" and the profiler off; then "regen it with hd
         # art always": the HD atlases in handheld mode too (peggle2_hd_atlases = 2, as peggle2_hd_always.toml).
         'peggle2_all_on_quiet.toml': (
-            'ALL ENHANCEMENTS ON, HD ART ALWAYS, 30 pictures a second, NO LOGGING, no profiler',
+            'ALL ENHANCEMENTS ON, HD ART ALWAYS, 60 pictures a second, NO LOGGING, no profiler',
             '# To play: as peggle2_all_on_dlc.toml (every enhancement, the PS4 powers\' screen layers and motion),\n'
-            '# with 30 pictures a second, no log and no profiler, and the HD atlases always: 1080p with them when\n'
+            '# with 60 pictures a second, no log and no profiler, and the HD atlases always: 1080p with them when\n'
             '# docked, 720p drawn from them (filtered down) in handheld mode. Needs peggle2_hd.pack beside the NRO.\n',
             True, DLC_TAIL + HD_HEAD + 'peggle2_render_height_handheld = 720\npeggle2_render_height_docked = 1080\n'
-                  'peggle2_hd_atlases = 2\n', {'peggle2_fps': '30', 'log_level': 'off'}, NO_PROFILING),
+                  'peggle2_hd_atlases = 2\n', {'peggle2_fps': '60', 'log_level': 'off'}, NO_PROFILING),
         # 2026-10-13: render resolution per console mode and the HD atlas pack (peggle2-nx-hd). All four are
         # peggle2_all_on_dlc.toml plus the settings named; the first writes the defaults out.
         'peggle2_hd_docked.toml': (
@@ -376,6 +401,17 @@ def main():
             '# docked) and peggle2_60fps_720.toml (no HD atlases, 720p) are lighter.\n',
             True, DLC_TAIL + HD_HEAD + 'peggle2_render_height_handheld = 720\npeggle2_render_height_docked = 1080\n'
                   'peggle2_hd_atlases = 2\n', {'peggle2_fps': '60'}, PROFILING),
+        # 2026-10-20: Renut's Direct3D-level renderer on deko3d (no PM4 ring, no EDRAM model), everything else as
+        # peggle2_all_on_dlc.toml with the release's picture (720p handheld, 1080p docked, HD atlases always), logs on
+        # for the first console runs.
+        'peggle2_renut_deko3d.toml': (
+            'RENUT\'S RENDERER ON DEKO3D (Direct3D level: no PM4 ring, no EDRAM model), every enhancement on',
+            '# The deko3d renderer of 2026-10-20 (docs/peggle2-notes.md, "Renut\'s renderer on deko3d"). 720p handheld,\n'
+            '# 1080p docked, the HD atlases always (peggle2_hd.pack beside the NRO), as the release build, at 60 pictures a\n'
+            '# second (peggle2_fps = 60; the user\'s choice of 2026-10-20; 30 is the console\'s own rate). Logs on: please\n'
+            '# keep logs/ after a run.\n',
+            True, DLC_TAIL + HD_HEAD + 'peggle2_render_height_handheld = 720\npeggle2_render_height_docked = 1080\n'
+                  'peggle2_hd_atlases = 2\n', {'renderer': 'renut', 'peggle2_fps': '60'}, PROFILING),
         'peggle2_cpu_off.toml': ('ALL CPU ENHANCEMENTS OFF (A/B baseline)', '', False, '', {}, PROFILING),
         'peggle2_cpu_verify.toml': (
             'CPU VERIFY: all on, every fast path checked against the original on every use',

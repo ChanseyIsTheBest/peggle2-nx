@@ -57,6 +57,11 @@
 /sdk/thirdparty/ffmpeg-overlay/*
 !/sdk/thirdparty/ffmpeg-overlay/codec_list.c
 
+# --- Vendored renderer sources (app/thirdparty): Microsoft's prebuilt DXC binaries are not tracked (as in banjo-nx)
+/app/thirdparty/reblue-XenosRecomp/thirdparty/dxc-bin/bin/
+/app/thirdparty/reblue-XenosRecomp/thirdparty/dxc-bin/lib/
+/app/thirdparty/plume/contrib/*/bin/*.exe
+
 # --- Logs, dumps and run data ----------------------------------------------------
 *.log
 *.dmp

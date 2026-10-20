@@ -13,7 +13,10 @@ include_guard(GLOBAL)
 
 set(REXGLUE_SWITCH_NVK_SDK "" CACHE PATH
     "portlibs/switch directory of the Mesa Horizon SDK (static NVK driver)")
-if(NOT EXISTS "${REXGLUE_SWITCH_NVK_SDK}/lib/libvulkan.a")
+# peggle2-nx (2026-10-20): OFF = no Vulkan driver in the title (a title whose only renderer is its own deko3d one):
+# rex::nvk links nothing of Mesa, and the Vulkan entry points the SDK still references come from the title.
+option(REXGLUE_SWITCH_LINK_NVK "Switch: link the static NVK Vulkan driver (Mesa) into the title" ON)
+if(REXGLUE_SWITCH_LINK_NVK AND NOT EXISTS "${REXGLUE_SWITCH_NVK_SDK}/lib/libvulkan.a")
     message(FATAL_ERROR
         "REXGLUE_SWITCH_NVK_SDK must point at <mesa-...-horizon-sdk>/opt/devkitpro/portlibs/switch "
         "(no lib/libvulkan.a under '${REXGLUE_SWITCH_NVK_SDK}')")
@@ -24,7 +27,12 @@ endif()
 # instead; the NVIDIA CUBIN parser that uses libelf never runs on Switch.
 # Listed twice for archive rescanning, as the Mesa config does without
 # LINK_GROUP support.
-if(NOT TARGET rex::nvk)
+if(NOT TARGET rex::nvk AND NOT REXGLUE_SWITCH_LINK_NVK)
+    add_library(rexglue_switch_nvk INTERFACE)
+    add_library(rex::nvk ALIAS rexglue_switch_nvk)
+    target_link_libraries(rexglue_switch_nvk INTERFACE zstd z nx stdc++ m)
+    target_link_options(rexglue_switch_nvk INTERFACE -pthread)
+elseif(NOT TARGET rex::nvk)
     add_library(rexglue_switch_nvk INTERFACE)
     add_library(rex::nvk ALIAS rexglue_switch_nvk)
     target_link_directories(rexglue_switch_nvk INTERFACE
@@ -61,6 +69,11 @@ if(NOT TARGET rexglue_switch_startup)
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_saltynx.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_sysclk.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_apm.cpp")
+    # peggle2-nx (2026-10-20): without the driver, the few entry points the Vulkan code references, and Mesa's
+    # posix_memalign (switch_no_vulkan.c).
+    if(NOT REXGLUE_SWITCH_LINK_NVK)
+        target_sources(rexglue_switch_startup PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../src/ui/switch_no_vulkan.c")
+    endif()
     # switch_perf.cpp registers every thread (the profiler needs their handles)
     # by wrapping libnx's threadCreate/threadClose, which pthread goes through.
     # It also counts the libnx calls that cost IPC or walk memory (fences,

@@ -19,7 +19,9 @@ so the game's speed is tied to 30 presented frames a second. After the label loc
 With peggle2_fps = 30 (the default) the port answers 2 and nothing changes.
 
   python tools/fps_updates.py [--gen app/generated/default] [--check]
-Idempotent. Runs after the optimisation steps of tools/post_codegen.py (it reads the text they leave).
+Idempotent. In tools/post_codegen.py right after leaf_locals.py (it reads the text the steps up to there leave)
+and before banjo-nx's analyses: they take a function with its `// peggle2-nx:` line for opaque
+(tools/leaf_dead_stores.py, OPAQUE_MARK), so this step must write that line in every function it changes.
 """
 import glob
 import os

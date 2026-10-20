@@ -60,6 +60,15 @@ inline T GuestPtr(u8* base, u32 guest_address) noexcept {
 
 class Memory;
 
+// From banjo-nx's SDK (2026-10-19): marks the store cards of a guest range (a byte per 4 KB page in `cards`). Renut's
+// renderer calls it; in Peggle 2 the generated code keeps no cards, so it only runs where Renut has them on.
+inline void MarkStoreCardsAt(u8* cards, u32 guest_address, u32 length) noexcept {
+  if (!cards || !length) return;
+  const uint64_t end = uint64_t(guest_address) + length - 1;
+  const u32 last = end > 0xFFFFFFFFull ? 0xFFFFFu : u32(end >> 12);
+  for (u32 page = guest_address >> 12; page <= last; ++page) cards[page] = 0;
+}
+
 enum SystemHeapFlag : uint32_t {
   kSystemHeapVirtual = 1 << 0,
   kSystemHeapPhysical = 1 << 1,

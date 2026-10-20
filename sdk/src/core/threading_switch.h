@@ -166,6 +166,18 @@ bool RexSwitchSetCurrentThreadCore(int core);
  */
 bool RexSwitchPinCurrentThreadToCore(int core);
 
+/*
+ * sa2-nx (2026-10-20): the calling thread's core mask (the process's cores only) with 'preferred' as its preferred
+ * core (one of the mask's). False if the kernel refuses it or the mask leaves none of the process's cores.
+ */
+bool RexSwitchSetCurrentThreadMask(int preferred, unsigned long long mask);
+/* sa2-nx (2026-10-20): the same for another registered thread, by its pthread (Thread::native_handle()). */
+bool RexSwitchSetThreadMaskOf(void* native_handle, int preferred, unsigned long long mask);
+
+/* From banjo-nx (2026-10-16): undoes RexSwitchPinCurrentThreadToCore: the current thread may run on every core of the
+ * process again (the process's core mask), preferring `core` (-1: the process default). Renut's renderer uses it. */
+bool RexSwitchUnpinCurrentThread(int core);
+
 /* Which core the calling thread is running on right now. It can only be asked about oneself. */
 int RexSwitchCurrentCore(void);
 

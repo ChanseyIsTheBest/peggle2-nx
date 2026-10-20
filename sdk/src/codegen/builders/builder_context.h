@@ -25,6 +25,12 @@ namespace rex::codegen {
 
 class FunctionNode;
 
+/// setjmp_save_locals: a setjmp site leaves these two markers in the body; FunctionGraph::emit replaces them once
+/// the function's whole set of C++-local registers is known (BuilderContext::emit_function_call). (sa2-nx, via
+/// banjo-nx.)
+inline constexpr std::string_view kSetjmpSaveLocalsMarker = "/*REX_SETJMP_SAVE_LOCALS*/";
+inline constexpr std::string_view kSetjmpRestoreLocalsMarker = "/*REX_SETJMP_RESTORE_LOCALS*/";
+
 struct RecompilerLocalVariables {
   bool ctr{};
   bool xer{};
@@ -67,6 +73,13 @@ struct RecompilerLocalVariables {
  *   instructions (vaddfp, vmaddfp, etc.)
  */
 enum class CSRState { Unknown, FPU, VMX };
+
+/// banjo-nx (fp_copy_forwarding): what the fneg / fabs / fnabs between an lfs and its stfs do to the single's bits:
+/// (bits & keep) ^ flip.
+struct FloatCopySign {
+  uint32_t keep = 0xFFFFFFFFu;
+  uint32_t flip = 0;
+};
 
 /**
  * @brief Context passed to instruction builders during code generation.
@@ -252,6 +265,12 @@ struct BuilderContext {
    */
   void emit_call_sharing_registers(const std::string& call, bool copyBack, const char* indent);
 
+  /// non_volatile_as_local_exclude (or a __save*/__rest* helper when anything calls them): non-volatiles stay in
+  /// ctx (banjo-nx).
+  bool keepsNonVolatilesInCtx() const;
+  /// A save/restore helper whose register range covers a non_volatile_as_local_keep register (banjo-nx).
+  bool helperCoversKeptRegister(const std::string& name) const;
+
   /// True if this function keeps anything in locals that a sharing callee would need.
   bool localizesAnything() const;
 
@@ -313,7 +332,9 @@ struct BuilderContext {
   /// fp_copy_pairs: this stfs / stfsx writes loaded bits: its register still holds what an lfs / lfsx of the
   /// same block put there (see RecompilerConfig::fpCopyPairs), and the form pays. It writes
   /// rex::ppc::QuietSingleBits of the register's bits local, without a conversion and without a mode statement.
-  bool float_copy_pair_store() const;
+  /// fp_copy_forwarding (banjo-nx): also in any mode, and `sign` receives what the fneg / fabs / fnabs followed
+  /// between the load and the store do to the bits.
+  bool float_copy_pair_store(FloatCopySign* sign = nullptr) const;
 
   /// An lfs/stfs form: true when the conversion must go through rex::ppc::SingleToDoubleAnyMode /
   /// DoubleToSingleAnyMode (fp_moves_modeless with VMX mode current: no switch); otherwise switches to FPU mode as

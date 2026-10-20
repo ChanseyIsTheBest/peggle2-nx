@@ -36,6 +36,12 @@ set(REXSDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../sdk" CACHE PATH "Path to the ReXG
 # (tools/win/build_glslang.ps1).
 option(PEGGLE2_NATIVE_RENDERER "Build the native Vulkan renderer (src/me)" ON)
 
+# 2026-10-20 (the user's call): the Switch build carries no Vulkan driver (Mesa's NVK): Renut's renderer on deko3d is
+# its renderer. The SDK's and plume's Vulkan code stays compiled but reaches no driver (sdk/src/ui/switch_no_vulkan.c);
+# the native renderer, which is Vulkan, cannot run there, so Renut's is chosen whatever peggle2_renderer says.
+# ON = NVK linked as before.
+set(REXGLUE_SWITCH_LINK_NVK OFF CACHE BOOL "Switch: link the static NVK Vulkan driver (Mesa) into the title")
+
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/rexglue.cmake")
     message(FATAL_ERROR "app/generated/rexglue.cmake is missing: run tools/codegen.ps1 first")
 endif()
@@ -156,6 +162,18 @@ endif()
 # Link the SDK. Stage 3 draws with ReXGlue's Xenos GPU emulation; the native renderer replaces it later.
 rexglue_setup_target(peggle2 GPU_PLUGINS xenos)
 target_include_directories(peggle2 PRIVATE src)
+
+# 2026-10-19: Renut's Direct3D-level renderer (reNut by masterspike52, as banjo-nx carries it, with its plume deko3d
+# back end): peggle2_renderer = "renut" at boot. No PM4 ring, no EDRAM model (cmake/peggle2_renut_gpu.cmake).
+# peggle2-nx (2026-10-20, from banjo-nx): Ryujinx starts NROs without argv[0]; the SDK then takes the NRO's usual place
+# on the SD (sdk/src/core/filesystem_posix.cpp). A console's hbloader always passes the path, so nothing changes there.
+if(REXGLUE_PLATFORM_SWITCH AND TARGET rexcore)
+    target_compile_definitions(rexcore PRIVATE REX_SWITCH_FALLBACK_EXE="/switch/peggle2-nx/peggle2.nro")
+endif()
+option(PEGGLE2_RENUT_RENDERER "Build Renut's Direct3D-level renderer (src/renut_engine/gpu)" ON)
+if(PEGGLE2_RENUT_RENDERER)
+    include(cmake/peggle2_renut_gpu.cmake)
+endif()
 
 # How the generated code was made (tools/codegen.ps1 writes it: "optimised" or "classic", + "+direct-calls"), for the
 # [enhancements] line. Re-read whenever codegen runs again.
@@ -300,6 +318,48 @@ endif()
 if(NOT PEGGLE2_GEN_PROMOTED_CALLS)
     list(APPEND _peggle2_round_definitions REX_PROMOTED_CALLS_OFF)
 endif()
+# banjo-nx's codegen round (2026-10-19; docs/peggle2-notes.md, "banjo-nx's codegen round"): one switch back per step of
+# tools/post_codegen.py, the same way. The two POISON switches are PC tests (a skipped register write gets a poison
+# value, so a reader the analysis missed breaks the game visibly); never for a build that ships.
+option(PEGGLE2_GEN_VPERM1 "A vperm of one vector as a one-register lookup (tools/vperm_one_source.py)" ON)
+option(PEGGLE2_GEN_FP_SIGN_OPS "fneg / fabs / fnabs as float operations (tools/fp_sign_ops.py)" ON)
+option(PEGGLE2_GEN_LEAF_DEAD "Leaf write-backs no caller can read are skipped (tools/leaf_dead_stores.py)" ON)
+option(PEGGLE2_GEN_LEAF_DEAD_POISON "PC test: poison the skipped leaf write-backs" OFF)
+option(PEGGLE2_GEN_DEAD_DEFS "Guest register writes no instruction can read are left out (tools/dead_ctx_defs.py)" ON)
+option(PEGGLE2_GEN_DEAD_DEFS_POISON "PC test: poison the left-out register writes" OFF)
+option(PEGGLE2_GEN_SINGLE_FLOATS "Single-precision arithmetic in float where its inputs are singles (tools/single_floats.py)" ON)
+option(PEGGLE2_GEN_INLINE_MEMCALLS "memcpy / memset of a constant size up to 64 bytes inline (tools/inline_memcalls.py)" ON)
+option(PEGGLE2_GEN_VEC_UNALIGNED "stvlx / stvrx as a few stores instead of byte loops (tools/vec_unaligned_stores.py)" ON)
+option(PEGGLE2_GEN_NARROW_LOOP_BARRIER "Loop barriers clobber the guest window only, not all memory (tools/loop_barriers.py)" ON)
+option(PEGGLE2_GEN_RO_CFG "Read-only constants followed over the control-flow graph (tools/ro_constants_cfg.py)" ON)
+option(PEGGLE2_GEN_FLUSH_HOIST "Loop-header flush-mode checks in front of the loop (tools/flush_hoist.py)" ON)
+option(PEGGLE2_GEN_LR_WRITE_SAME "Link-register write-backs proven redundant compile to nothing (tools/lr_preserve.py)" ON)
+option(PEGGLE2_GEN_R1_LOCAL "Guest r1 as a local mirror in the chosen functions (tools/r1_local.py)" ON)
+option(PEGGLE2_GEN_VSEL_NEON "VMX vsel as one NEON bit select (tools/vsel_neon.py)" ON)
+option(PEGGLE2_GEN_INLINE_LEAVES "Inline copies of the tiny leaf functions each file calls in another (tools/inline_leaves.py)" ON)
+foreach(_pair "VPERM1;REX_VPERM1_OFF" "FP_SIGN_OPS;REX_FP_SIGN_INTEGER" "LEAF_DEAD;REX_LEAF_DEAD_KEEP"
+              "DEAD_DEFS;REX_DEAD_DEFS_KEEP" "SINGLE_FLOATS;REX_SINGLE_FLOATS_OFF"
+              "INLINE_MEMCALLS;REX_INLINE_MEMCALLS_OFF" "VEC_UNALIGNED;REX_VEC_UNALIGNED_LOOPS"
+              "NARROW_LOOP_BARRIER;REX_LOOP_BARRIER_FULL" "RO_CFG;REX_RO_CFG_OFF" "FLUSH_HOIST;REX_FLUSH_HOIST_OFF"
+              "LR_WRITE_SAME;REX_LR_WRITE_SAME_OFF" "R1_LOCAL;REX_R1_LOCAL_OFF" "VSEL_NEON;REX_VSEL_OFF"
+              "INLINE_LEAVES;REX_INLINE_LEAVES_OFF")
+    list(GET _pair 0 _step)
+    list(GET _pair 1 _off)
+    if(NOT PEGGLE2_GEN_${_step})
+        list(APPEND _peggle2_round_definitions ${_off})
+    endif()
+endforeach()
+if(PEGGLE2_GEN_LEAF_DEAD_POISON)
+    list(APPEND _peggle2_round_definitions REX_LEAF_DEAD_POISON)
+endif()
+if(PEGGLE2_GEN_DEAD_DEFS_POISON)
+    list(APPEND _peggle2_round_definitions REX_DEAD_DEFS_POISON)
+endif()
+# The PC build (a test build: nothing ships for the PC) checks the proofs of the two late steps at run time, as it
+# checks every read-only constant (RexRoCheck): src/cpu/peggle2_codegen_checks.cpp counts them for the [verify] line.
+if(NOT REXGLUE_PLATFORM_SWITCH)
+    list(APPEND _peggle2_round_definitions REX_R1_CHECK REX_LR_WRITE_SAME_CHECK)
+endif()
 # The game code and the app (whose localized copies are the same generated statements).
 foreach(target peggle2_recomp peggle2)
     if(TARGET ${target} AND _peggle2_round_definitions)
@@ -310,6 +370,14 @@ message(STATUS "peggle2: CPU rounds: read-only constants ${PEGGLE2_GEN_RO_CONSTA
                "${PEGGLE2_GEN_FLOAT_LOADS}, leaf locals ${PEGGLE2_GEN_LEAF_LOCALS}, loop locals "
                "${PEGGLE2_GEN_LOOP_LOCALS}, cold traps ${PEGGLE2_GEN_COLD_TRAPS}, promoted calls "
                "${PEGGLE2_GEN_PROMOTED_CALLS}")
+message(STATUS "peggle2: banjo-nx's codegen round: vperm1 ${PEGGLE2_GEN_VPERM1}, fp sign ops ${PEGGLE2_GEN_FP_SIGN_OPS}, "
+               "leaf dead ${PEGGLE2_GEN_LEAF_DEAD} (poison ${PEGGLE2_GEN_LEAF_DEAD_POISON}), dead defs "
+               "${PEGGLE2_GEN_DEAD_DEFS} (poison ${PEGGLE2_GEN_DEAD_DEFS_POISON}), single floats "
+               "${PEGGLE2_GEN_SINGLE_FLOATS}, inline memcalls ${PEGGLE2_GEN_INLINE_MEMCALLS}, vec unaligned "
+               "${PEGGLE2_GEN_VEC_UNALIGNED}, narrow loop barrier ${PEGGLE2_GEN_NARROW_LOOP_BARRIER}, ro cfg "
+               "${PEGGLE2_GEN_RO_CFG}, flush hoist ${PEGGLE2_GEN_FLUSH_HOIST}, lr write same "
+               "${PEGGLE2_GEN_LR_WRITE_SAME}, r1 local ${PEGGLE2_GEN_R1_LOCAL}, vsel neon ${PEGGLE2_GEN_VSEL_NEON}, "
+               "inline leaves ${PEGGLE2_GEN_INLINE_LEAVES}")
 
 # PC diagnostic (sa2-nx, 2026-10-12): the game code and the app count the executions of the any-mode float helpers
 # (rex/ppc/diet_ops.h, REX_DIET_CENSUS_ON) in counters the app defines (src/cpu/peggle2_codegen_checks.cpp), for the
@@ -509,7 +577,7 @@ if(REXGLUE_PLATFORM_SWITCH)
     target_link_options(peggle2 PRIVATE "LINKER:-Map=${CMAKE_BINARY_DIR}/peggle2.map")
     # The homebrew menu's entry: name, author, version and icon (app/icon.jpg, 256x256 JPEG; the user's picture,
     # 2026-10-14).
-    set(PEGGLE2_VERSION "1.0.0" CACHE STRING "NRO display version" FORCE)
+    set(PEGGLE2_VERSION "1.0.1" CACHE STRING "NRO display version" FORCE)
     set(_peggle2_icon "")
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")
         set(_peggle2_icon ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")

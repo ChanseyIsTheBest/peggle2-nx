@@ -49,6 +49,15 @@ REXCVAR_DEFINE_BOOL(ignore_thread_priorities, true, "Kernel",
 REXCVAR_DEFINE_BOOL(ignore_thread_affinities, true, "Kernel",
                     "Ignores game-specified thread affinities");
 
+#if REX_PLATFORM_SWITCH
+namespace {
+// sa2-nx (2026-10-20, RexSetGuestThreadCoreLayout): the guest threads' cores besides the main thread's (0: the
+// process's, as before), and the preferred one among them, for the threads created from then on.
+std::atomic<uint32_t> g_guest_core_mask{0};
+std::atomic<int32_t> g_guest_core_preferred{-1};
+}  // namespace
+#endif
+
 namespace rex::system {
 
 const uint32_t XAPC::kSize;
@@ -470,6 +479,15 @@ X_STATUS XThread::Create() {
     rex::initialize_seh_thread();
 #if REX_PLATFORM_SWITCH
     RexSwitchSetCurrentThreadPriority(SwitchPriorityFor(guest_thread_, thread_name_));
+    // sa2-nx (2026-10-20): known to the pthread layer by its kernel handle, so another thread can set its cores
+    // (RexSetGuestThreadCoreLayout: the registry was empty, and setting another thread's mask failed quietly).
+    RexSwitchRegisterCurrentThread();
+    // sa2-nx (2026-10-20): a guest thread made after the layout was set takes the other guest threads' cores.
+    if (guest_thread_ && !main_thread_) {
+      const uint32_t mask = g_guest_core_mask.load(std::memory_order_acquire);
+      if (mask)
+        RexSwitchSetCurrentThreadMask(g_guest_core_preferred.load(std::memory_order_relaxed), mask);
+    }
 #endif
     runtime::ThreadState::Bind(thread_state_.get());
 
@@ -491,6 +509,10 @@ X_STATUS XThread::Create() {
 
     PROFILE_THREAD_EXITED();
     PROFILE_THREAD_EXIT();
+
+#if REX_PLATFORM_SWITCH
+    RexSwitchUnregisterCurrentThread();  // sa2-nx (2026-10-20): see RexSwitchRegisterCurrentThread above
+#endif
 
     // Release the self-reference to the thread.
     ReleaseHandle();
@@ -1503,3 +1525,34 @@ void XHostThread::Execute() {
 }
 
 }  // namespace rex::system
+
+// sa2-nx (2026-10-20): the Switch's core layout for a game whose main thread does the game's work and its drawing
+// (Renut's renderer: sa2_renut_core_layout). The guest main thread is pinned to 'main_core', every other guest thread,
+// now and to come, gets 'others_mask' (preferring 'others_preferred'), so none of them shares the main thread's core:
+// at the game threads' priority Horizon time-slices threads of a core in 10 ms slices. The host threads keep their own
+// placement (the render thread on core 1). Returns the threads moved. A no-op elsewhere.
+extern "C" uint32_t RexSetGuestThreadCoreLayout(int main_core, uint32_t others_mask, int others_preferred) {
+#if REX_PLATFORM_SWITCH
+  using rex::system::XThread;
+  g_guest_core_preferred.store(others_preferred, std::memory_order_relaxed);
+  g_guest_core_mask.store(others_mask, std::memory_order_release);
+  auto* kernel = rex::system::kernel_state();
+  if (!kernel) return 0;
+  uint32_t moved = 0;
+  for (auto& thread : kernel->object_table()->GetObjectsByType<XThread>()) {
+    if (!thread || !thread->is_guest_thread() || !thread->thread()) continue;
+    if (thread->main_thread()) {
+      thread->thread()->set_affinity_mask(uint64_t(1) << main_core);
+    } else if (!RexSwitchSetThreadMaskOf(thread->thread()->native_handle(), others_preferred, others_mask)) {
+      thread->thread()->set_affinity_mask(others_mask);  // (the lowest core preferred)
+    }
+    ++moved;
+  }
+  return moved;
+#else
+  (void)main_core;
+  (void)others_mask;
+  (void)others_preferred;
+  return 0;
+#endif
+}

@@ -45,12 +45,14 @@ input_joycon_sideways = true
 
 # Renderer: the native Vulkan renderer (PM4 ring -> NVK). It needs peggle2_shaders.mesp (+ .idx) next to the NRO,
 # built from your own game files (tools/build_shader_library.sh). false = ReXGlue's emulated Xenos GPU: the reference
-# image, but far too slow on the console.
+# image, but far too slow on the console. An NRO built without the Vulkan driver (development builds since
+# 2026-10-20) ignores these two lines and runs Renut's renderer on deko3d (deko3d_glsl.bin next to the NRO).
 masseffect_renderer_native = true
 gpu_plugin = "xenos"
 
 # Logs go to logs/ next to the NRO. Please keep them after a test run.
 log_level = "info"
+log_to_file = true
 
 # ---- Profiler (on; not under the enhancement masters) ----
 switch_profile_stacks = true                            # console CPU sampler: 1 ms stack samples into logs/rex/rex_profile.log
@@ -60,7 +62,7 @@ masseffect_gpu_marks_categories = true                  # GPU time per pass cate
 peggle2_cpu_enhancements = true
 peggle2_noncpu_enhancements = true
 
-# ---- CPU enhancements (100) ----
+# ---- CPU enhancements (136) ----
 masseffect_wait_blocking_ring = true                    # gpu_wait_sleep: the game's GPU busy-wait (sub_8261D378) sleeps until the ring moves; native renderer only
 masseffect_native_wait_reg_mem_us = 1000                # wait_reg_mem_events: the ring's WAIT_REG_MEM parks until an interrupt, write pointer or swap (at most 1 ms); off = 50 us polling
 masseffect_native_deferred_recording = false            # ring_deferred_recording: a worker records the ring's Vulkan commands (NOT pixel-identical in futari-nx's lockstep)  (EXPLICIT ONLY: off unless you set it; see the known issues)
@@ -81,6 +83,42 @@ masseffect_native_indices_cache = true                  # ring_indices_cache: co
 masseffect_native_pipelines_prewarm = true              # ring_pipelines_prewarm: pipelines of earlier runs created at startup
 kernel_critsec_pcr_owner = true                         # critsec_pcr_owner: critical sections take their owner from the guest context (r13 -> KPCR) instead of a thread lookup
 thread_signal_skip_idle = true                          # thread_signal_skip_idle: no condition-variable notify (a syscall on Horizon) for an event or semaphore nobody is blocked on
+banjo_deko3d_push_constants = true                      # renut_push_constants: Renut: float and shared constants pushed into fixed uniform buffers
+banjo_deko3d_ring_cleaner = true                        # renut_ring_cleaner: Renut: the upload ring's cache clean on the background core
+banjo_renut_capture_pool = true                         # renut_capture_pool: Renut: queued draws' captures from a pool
+banjo_renut_cpu_memos = true                            # renut_cpu_memos: Renut: the render thread's per-draw lookups memoised (targets, textures, streams, memexport)
+banjo_renut_pipeline_memo = true                        # renut_pipeline_memo: Renut: a memo of the pipeline each key gave
+banjo_renut_shared_dedupe = true                        # renut_shared_dedupe: Renut: shared constants equal to the previous draw's not uploaded again
+banjo_renut_queue_notify_idle = true                    # renut_queue_notify_idle: Renut: queued work wakes the render thread only while it waits
+banjo_renut_record_worker = true                        # renut_record_worker: Renut: command recording split across two threads
+banjo_renut_pmull_hash = true                           # renut_pmull_hash: Renut (ARM): content hashes with PMULL folding
+banjo_renut_neon_swap = true                            # renut_neon_swap: Renut (ARM): vertex byte swaps 16 bytes per NEON reverse
+banjo_renut_upload_cached = true                        # renut_upload_cached: Renut (Switch): the upload ring in CPU-cached memory
+banjo_ring_core = 1                                     # renut_ring_core: Renut (Switch): the render thread pinned to core 1
+banjo_background_compile_core = 2                       # renut_compile_core: Renut (Switch): pipeline prewarm and specialisation threads pinned to core 2
+banjo_renut_record_worker_core = 0                      # renut_record_worker_core: Renut (Switch): the recording worker pinned to core 0
+sa2_renut_snapshot_deltas = true                        # renut_snapshot_deltas: Renut: a draw sends only the 64-byte device chunks and constant groups that changed, not the whole 13 KB device
+futari_renut_deferred_chain = true                      # renut_deferred_chain: Renut: Begin*Vertices draws (nearly all of Peggle 2's) in the delta chain too (futari-nx's)
+sa2_renut_snapshot_deltas_constants = true              # renut_snapshot_deltas_constants: Renut: the delta chain's draws push only their changed constant groups
+sa2_renut_snapshot_deltas_narrow = true                 # renut_snapshot_deltas_narrow: Renut: the delta chain compares only the 40 of 77 device chunks the render thread reads
+sa2_renut_neon_compare = true                           # renut_neon_compare: Renut (ARM): 64-byte lines compared with four 128-bit loads a side
+sa2_renut_capture_batches = true                        # renut_capture_batches: Renut: draw captures taken from and given back to their pool 32 at a time
+sa2_renut_callbacks_fast = true                         # renut_callbacks_fast: Renut: the hooks' first calls return without locks when nothing waits
+sa2_renut_wake_batch = 16                               # renut_wake_batch: Renut: a sleeping render thread woken by the game's draws once 16 are queued (other items and waits at once)
+sa2_renut_prefetch_next = true                          # renut_prefetch_next: Renut: the next draw's capture prefetched while the render thread does the one before
+sa2_renut_done_notify_waiters = true                    # renut_done_notify_waiters: Renut: the render thread's done signal only when a thread waits for it
+sa2_renut_batch_clock = true                            # renut_batch_clock: Renut: one clock read per batch of render-thread work, not per item
+sa2_renut_chain_reuse = true                            # renut_chain_reuse: Renut: a chain draw reuses the previous draw's key, targets, viewport, textures and pipeline when unchanged
+sa2_renut_inline_line_compare = true                    # renut_inline_line_compare: Renut: the shared constants' lines compared inline, not by memcmp calls
+sa2_renut_stream_mask = true                            # renut_stream_mask: Renut: vertex streams walked by a mask of the used ones
+sa2_renut_texture_defaults_copy = true                  # renut_texture_defaults_copy: Renut: the default texture and sampler words as one block copy
+sa2_renut_fetch_slots_skip = true                       # renut_fetch_slots_skip: Renut: shared-constant lines known equal (textures, fetch slots) not compared
+sa2_renut_fetch_data_unread = true                      # renut_fetch_data_unread: Renut: a draw that fetches nothing by address keeps the fetch address 0 (no upload a draw)
+sa2_renut_shared_partial_clear = true                   # renut_shared_partial_clear: Renut: only the shared constants after the texture words zeroed a draw
+sa2_renut_lean_diagnostics = true                       # renut_lean_diagnostics: Renut: the per-draw diagnostic counts only while their 10 s lines are logged
+sa2_renut_core_layout = true                            # renut_core_layout: Renut (Switch): the guest main thread alone on core 0, the other guest threads on cores 1-2 preferring 2
+peggle2_renut_texture_backoff = 32                      # renut_texture_backoff: Renut: an unchanged linear texture checked again after 2, 4 ... 32 frames (the native renderer's scheme)
+peggle2_renut_hd_async = true                           # renut_hd_async: Renut: the HD atlases read on a worker thread, not the render thread
 peggle2_cpu_guest_cas_no_barrier = true                 # guest_cas_no_barrier: Compare-and-swap (the game's interlocked operations, tools/guest_cas.py, and the SDK's lock words, rex/thread/atomic.h) without the legacy builtin's trailing dmb ish on the A57; off puts the barrier back at run time
 peggle2_cpu_hook_counter_shared = true                  # hook_counter_shared: Native replacements: one relaxed call counter per hook shared by all threads instead of a thread_local one (on the Switch every thread_local access is a call to __aarch64_read_tp, on every hooked call)
 peggle2_cpu_hook_counter_ctx = true                     # hook_counter_ctx: Native replacements: each hook's call counter lives in the calling thread's own context (PPCContext::host_counters) instead of one counter shared by all threads: no store into a cache line every calling thread pulls to its core, and still no thread_local
@@ -162,13 +200,51 @@ peggle2_cpu_native_sub_82591E00 = true                  # native_sub_82591E00: l
 peggle2_cpu_native_sub_825BF458 = true                  # native_sub_825BF458: localized copy of sub_825BF458: Wwise (0.5 %)
 peggle2_cpu_native_sub_825BA158 = true                  # native_sub_825BA158: localized copy of sub_825BA158: Wwise (0.4 %)
 
-# ---- Non-CPU enhancements (24) ----
+# ---- Non-CPU enhancements (62) ----
 peggle2_native_edram4_clear_color0 = true               # edram4_clear_color0: a depth + color 0 clear drawn through a 4x alias is cleared in the 1x owners (no 4x draw and 4x -> 1x transfer)
 peggle2_native_constants_dedupe = true                  # constants_dedupe: a new shader-constant generation with the bytes uploaded last reuses that block (no upload, no rebind)
 peggle2_native_pass_narrow_end = true                   # pass_narrow_end: a render pass's end dependency names its real consumers instead of MEMORY_READ|WRITE
 peggle2_native_zcull_1x_depth = false                   # zcull_1x_depth: 1x depth views keep their ZCULL plane (copy-engine stencil imports use masked stencil passes)  (EXPLICIT ONLY: off unless you set it; see the known issues)
 masseffect_native_vs_relaxed_match = true               # vs_relaxed_match: vertex shaders whose fetch swizzles D3D patched are matched to the library
 asset_pack = true                                       # asset_pack: game data read from game_root.nxpack instead of the folder (used anyway when only the pack exists)
+banjo_deko3d_alpha_spec = true                          # renut_alpha_spec: Renut deko3d: the alpha test's function in the pipeline (constant 903)
+banjo_deko3d_tess_spec = true                           # renut_tess_spec: Renut deko3d: no tessellation code in pipelines without it (constant 904)
+banjo_deko3d_early_hoist = true                         # renut_early_hoist: Renut deko3d: the early alpha test's texture fetch hoisted
+banjo_deko3d_early_z = true                             # renut_early_z: Renut deko3d: depth tested before a discarding shader in a draw that writes no depth (constant 909)
+banjo_deko3d_txq_constants = true                       # renut_txq_constants: Renut deko3d: texture sizes from a buffer, not a texture query (constant 908)
+banjo_deko3d_vs_outputs = true                          # renut_vs_outputs: Renut deko3d: vertex shaders write only what the pixel shader reads
+banjo_deko3d_uam_prmt = true                            # renut_uam_prmt: Renut deko3d: uam's byte swaps as PRMT
+banjo_deko3d_uam_gvn = true                             # renut_uam_gvn: Renut deko3d: uam's global value numbering
+banjo_deko3d_uam_uniform_branches = true                # renut_uam_uniform_branches: Renut deko3d: uam's uniform branches without reconvergence
+banjo_deko3d_uam_wide_rows = true                       # renut_uam_wide_rows: Renut deko3d: uam's 128-bit bone-row loads
+banjo_deko3d_zcull = true                               # renut_zcull: Renut deko3d: hierarchical depth culling
+banjo_deko3d_depth_compression = true                   # renut_depth_compression: Renut deko3d: compressed depth targets
+banjo_deko3d_depth24 = true                             # renut_depth24: Renut deko3d: D24S8 targets as 24-bit depth
+banjo_deko3d_depth_handover = true                      # renut_depth_handover: Renut deko3d: a whole depth resolve handed over, not drawn
+banjo_deko3d_draw_resolves = true                       # renut_draw_resolves: Renut deko3d: colour resolves drawn on the 3D engine
+banjo_deko3d_barrier_lean = true                        # renut_barrier_lean: Renut deko3d: write-only transitions keep the texture cache
+banjo_deko3d_barrier_merge = true                       # renut_barrier_merge: Renut deko3d: back-to-back barriers merged
+banjo_gpu_depth_only = true                             # renut_depth_only: Renut: depth-only pipelines for colourless draws
+banjo_gpu_depth_words_view = true                       # renut_depth_words_view: Renut: a depth resolve's words read through its own texture
+banjo_gpu_output_trim = true                            # renut_output_trim: Renut: colour outputs a pipeline never writes trimmed
+banjo_gpu_bool_spec = true                              # renut_bool_spec: Renut: bool constants as specialisation constants
+banjo_gpu_tess_grid = true                              # renut_tess_grid: Renut: tessellated patches as a precomputed grid
+banjo_gpu_robustness_off = true                         # renut_robustness_off: Renut (Vulkan): pipelines without buffer and image robustness
+banjo_gpu_nvk_draw_contract = true                      # renut_nvk_draw_contract: Renut on NVK: NVK's per-draw contract
+banjo_gpu_blend_skip = true                             # renut_blend_skip: Renut: pixels whose blend changes nothing discarded
+banjo_renut_precise_barriers = true                     # renut_precise_barriers: Renut (Vulkan): barriers' access masks from the layouts
+banjo_renut_push_point_only = true                      # renut_push_point_only: Renut (Vulkan): the push constant read only by point sprites
+banjo_renut_resolve_skip = true                         # renut_resolve_skip: Renut: a resolve of an unchanged source into the same texture not done again
+banjo_renut_depth_words_lazy = true                     # renut_depth_words_lazy: Renut: a depth resolve's words written only when read
+banjo_renut_memory_policy = true                        # renut_memory_policy: Renut: memory limits sized for the console
+peggle2_renut_texture_cap_mb = 512                      # renut_texture_cap: Renut (deko3d): host textures above 512 MB released when not bound for 120 frames
+banjo_renut_pipeline_cache = true                       # renut_pipeline_cache: Renut (Vulkan): the driver's pipelines kept on disk
+banjo_renut_cache_save_quiet = true                     # renut_cache_save_quiet: Renut: the pipeline cache saved once no pipeline was built for a while
+banjo_renut_linked_stages = true                        # renut_linked_stages: Renut on NVK (Switch): each pipeline's stages compiled together
+banjo_deko3d_kick_submit = true                         # renut_kick_submit: Renut deko3d, input lag: command lists handed to the GPU at the game's kicks
+banjo_late_input = true                                 # renut_late_input: Renut, input lag: a frame's first controller read as late as the render thread's slack allows
+banjo_deko3d_eager_kicks = true                         # renut_eager_kicks: Renut deko3d, input lag: lists of 100 draws, up to 6 a frame, each sent to the GPU at its own kick
+banjo_display_sync = true                               # renut_display_sync: Renut on the Switch, input lag: the frame limiter paced by the display's vsync event (phase auto, at most 12 ms)
 peggle2_gpu_boost = true                                # boost: Handheld: ask for the official 460.8 MHz GPU profile (memory clock checked unchanged, else reverted)
 peggle2_native_dedupe_sync_epochs = true                # dedupe_sync_epochs: Ring thread: the vertex dedupe and the index cache forget their recorded ranges at every GPU-to-game signal in the command stream (fence and memory writes, interrupts), the guest synchronization they were designed around (its counter was never advanced)
 peggle2_gpu_lock_rechecks = true                        # lock_rechecks: The renderer reads a texture again at its next use when the game's loader has written it (or Direct3D announced a write lock of its memory); off = it waits for its recheck interval, so an atlas loaded into the previous level's memory shows the old image for up to 39 frames

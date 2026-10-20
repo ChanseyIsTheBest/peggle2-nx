@@ -108,10 +108,21 @@ def main():
     else:
         print('flavour: optimised codegen')
     mesa = sorted(set(re.findall(rb'Mesa \d+\.\d+\.\d+ \(git-[0-9a-f]+\)', nro)))
-    sdk = sorted(set(re.findall(rb'Mesa \d+\.\d+\.\d+ \(git-[0-9a-f]+\)', open(a.sdk_vulkan, 'rb').read())))
-    print('Mesa in the NRO:', [m.decode() for m in mesa], '| in the SDK:', [m.decode() for m in sdk])
-    if not mesa or mesa != sdk:
-        failures.append('the NRO does not carry the SDK driver\'s Mesa string')
+    # 2026-10-20: the Switch build carries no Vulkan driver unless its CMake cache says REXGLUE_SWITCH_LINK_NVK=ON.
+    cache = os.path.join(os.path.dirname(os.path.abspath(a.elf)), 'CMakeCache.txt')
+    link_nvk = True
+    if os.path.exists(cache):
+        m = re.search(r'^REXGLUE_SWITCH_LINK_NVK:BOOL=(\w+)', open(cache, encoding='utf-8', errors='replace').read(), re.M)
+        link_nvk = bool(m) and m.group(1).upper() in ('ON', 'TRUE', '1', 'YES')
+    if link_nvk:
+        sdk = sorted(set(re.findall(rb'Mesa \d+\.\d+\.\d+ \(git-[0-9a-f]+\)', open(a.sdk_vulkan, 'rb').read())))
+        print('Mesa in the NRO:', [m.decode() for m in mesa], '| in the SDK:', [m.decode() for m in sdk])
+        if not mesa or mesa != sdk:
+            failures.append('the NRO does not carry the SDK driver\'s Mesa string')
+    else:
+        print('Vulkan driver: none (REXGLUE_SWITCH_LINK_NVK OFF); Mesa strings in the NRO:', [m.decode() for m in mesa])
+        if mesa:
+            failures.append('the NRO carries a Mesa driver although the build links none')
 
     # One streaming pass over the disassembly: per function, b-to-self and fused multiply-adds.
     proc = subprocess.Popen([DEVKITA64 + 'aarch64-none-elf-objdump' + EXE, '-d', '--no-show-raw-insn', a.elf],

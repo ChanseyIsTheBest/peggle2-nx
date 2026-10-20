@@ -73,6 +73,10 @@
 #include "me/peggle2_api.h"
 
 #include "me/me_native_system.h"
+#if PEGGLE2_RENUT_RENDERER
+#include "renut_engine/gpu/banjo_renut_select.h"
+#include "renut_engine/gpu/banjo_shared_hooks.h"
+#endif
 
 REXCVAR_DEFINE_BOOL(peggle2_dump_shaders, false, "Peggle2",
                     "Write every shader container the game creates to shaders/ next to the executable "
@@ -144,6 +148,9 @@ void DumpShaderBlob(const uint8_t* base, uint32_t blob_address, bool vertex) {
 // Draw-time shader load (FlushState's shader part, called from BeginVertices and DrawIndexedVertices).
 REX_EXTERN(__imp__sub_8262B248);
 REX_HOOK_RAW(sub_8262B248) {
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD(sub_8262B248)  // Renut's renderer chosen: not the native renderer's
+#endif
   const uint32_t device = ctx.r3.u32;
   if (device >= 0x40000000 && device < 0x7F000000) {
     const uint32_t vs = Load32(base, device + kDeviceVertexShader), ps = Load32(base, device + kDevicePixelShader);
@@ -159,6 +166,9 @@ REX_HOOK_RAW(sub_8262B248) {
 // (peggle2_cpu_direct_state: BeginDrawDirect before the original, EndDrawDirect right after it).
 REX_EXTERN(__imp__sub_826221A0);
 REX_HOOK_RAW(sub_826221A0) {  // D3DDevice_BeginVertices
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD_SHARED(sub_826221A0)  // Renut's renderer chosen: not the native renderer's
+#endif
   if (peggle2::api::BeginVertices(ctx, base)) return;  // peggle2_api_draws: natively (no PM4 for the draw)
   auto direct = me::native::BeginDrawDirect(base, ctx.r3.u32);
   me::native::NoteDrawCall(base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, &direct);
@@ -172,6 +182,9 @@ REX_HOOK_RAW(sub_826221A0) {  // D3DDevice_BeginVertices
 
 REX_EXTERN(__imp__sub_826226A8);
 REX_HOOK_RAW(sub_826226A8) {  // D3DDevice_DrawIndexedVertices (not native in sa2-nx's layer: step 1 + 2 here)
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD_SHARED(sub_826226A8)  // Renut's renderer chosen: not the native renderer's
+#endif
   auto direct = me::native::BeginDrawDirect(base, ctx.r3.u32);
   me::native::NoteDrawCall(base, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, &direct);
   __imp__sub_826226A8(ctx, base);
@@ -182,6 +195,9 @@ REX_HOOK_RAW(sub_826226A8) {  // D3DDevice_DrawIndexedVertices (not native in sa
 // whose BeginVertices call comes through the hook above.
 REX_EXTERN(__imp__sub_82622660);
 REX_HOOK_RAW(sub_82622660) {
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD_SHARED(sub_82622660)  // Renut's renderer chosen: not the native renderer's
+#endif
   if (peggle2::api::DrawVerticesUP(ctx, base)) return;
   __imp__sub_82622660(ctx, base);
 }
@@ -192,6 +208,9 @@ REX_HOOK_RAW(sub_82622660) {
 // first register, r6 = the shadow in the device (the fetch flush has its own: device+1152, registers 0x4800).
 REX_EXTERN(__imp__sub_8262A4B0);
 REX_HOOK_RAW(sub_8262A4B0) {  // shader constants: 16 registers a bit (r5 = 0x4000 VS / 0x4400 PS)
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD(sub_8262A4B0)  // Renut's renderer chosen: not the native renderer's
+#endif
   if (me::native::FlushRunsDirect(ctx, base, ctx.r3.u32, ctx.r4.u64, ctx.r5.u32, ctx.r6.u32,
                                   me::native::FlushKind::kConstants, &__imp__sub_8262A4B0))
     return;
@@ -199,6 +218,9 @@ REX_HOOK_RAW(sub_8262A4B0) {  // shader constants: 16 registers a bit (r5 = 0x40
 }
 REX_EXTERN(__imp__sub_8262A358);
 REX_HOOK_RAW(sub_8262A358) {  // fetch constants: 6 registers a bit from 0x4800, then the 0x5000 end packet
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD(sub_8262A358)  // Renut's renderer chosen: not the native renderer's
+#endif
   if (me::native::FlushRunsDirect(ctx, base, ctx.r3.u32, ctx.r4.u64, 0x4800, ctx.r3.u32 + 1152,
                                   me::native::FlushKind::kFetch, &__imp__sub_8262A358))
     return;
@@ -206,6 +228,9 @@ REX_HOOK_RAW(sub_8262A358) {  // fetch constants: 6 registers a bit from 0x4800,
 }
 REX_EXTERN(__imp__sub_8262A118);
 REX_HOOK_RAW(sub_8262A118) {  // register groups: 1 register a bit
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD(sub_8262A118)  // Renut's renderer chosen: not the native renderer's
+#endif
   if (me::native::FlushRunsDirect(ctx, base, ctx.r3.u32, ctx.r4.u64, ctx.r5.u32, ctx.r6.u32,
                                   me::native::FlushKind::kGroups, &__imp__sub_8262A118))
     return;
@@ -215,6 +240,9 @@ REX_HOOK_RAW(sub_8262A118) {  // register groups: 1 register a bit
 // peggle2_api_draws, verify mode: Direct3D's inline-data allocator answers at once inside a shadow run of the original.
 REX_EXTERN(__imp__sub_826233C8);
 REX_HOOK_RAW(sub_826233C8) {
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD_SHARED(sub_826233C8)  // Renut's renderer chosen: not the native renderer's
+#endif
   if (peggle2::api::ShadowInlineAlloc(ctx, base)) return;
   __imp__sub_826233C8(ctx, base);
 }
@@ -222,6 +250,9 @@ REX_HOOK_RAW(sub_826233C8) {
 // peggle2_api_clears: D3DDevice_Clear as a record.
 REX_EXTERN(__imp__sub_8261EE00);
 REX_HOOK_RAW(sub_8261EE00) {
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD_SHARED(sub_8261EE00)  // Renut's renderer chosen: not the native renderer's
+#endif
   if (peggle2::api::Clear(ctx, base)) return;
   __imp__sub_8261EE00(ctx, base);
 }
@@ -229,24 +260,36 @@ REX_HOOK_RAW(sub_8261EE00) {
 // peggle2_api_draws: Direct3D's window offset/scissor writer (registers 0x2080-0x2082) as a record.
 REX_EXTERN(__imp__sub_82617E58);
 REX_HOOK_RAW(sub_82617E58) {
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD_SHARED(sub_82617E58)  // Renut's renderer chosen: not the native renderer's
+#endif
   if (peggle2::api::WindowScissor(ctx, base)) return;
   __imp__sub_82617E58(ctx, base);
 }
 
 REX_EXTERN(__imp__sub_82613480);
 REX_HOOK_RAW(sub_82613480) {  // D3DDevice_CreateVertexShader (r3 = the container blob)
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD_SHARED(sub_82613480)  // Renut's renderer chosen: not the native renderer's
+#endif
   DumpShaderBlob(base, ctx.r3.u32, true);
   __imp__sub_82613480(ctx, base);
 }
 
 REX_EXTERN(__imp__sub_82613298);
 REX_HOOK_RAW(sub_82613298) {  // D3DDevice_CreatePixelShader (r3 = the container blob)
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD_SHARED(sub_82613298)  // Renut's renderer chosen: not the native renderer's
+#endif
   DumpShaderBlob(base, ctx.r3.u32, false);
   __imp__sub_82613298(ctx, base);
 }
 
 REX_EXTERN(__imp__sub_8261D378);
 REX_HOOK_RAW(sub_8261D378) {  // D3D GPU wait: has the ring read pointer moved since the last iteration?
+#if PEGGLE2_RENUT_RENDERER
+  BANJO_RENUT_YIELD_SHARED(sub_8261D378)  // Renut's renderer chosen: not the native renderer's
+#endif
   const uint32_t wait_state = ctx.r3.u32;
   const uint32_t device = LoadGuest32(base, wait_state);
   if (device >= 0x40000000 && device < 0x7F000000 && !(base[device + kDeviceGpuState] & 0x02)) {

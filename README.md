@@ -10,10 +10,23 @@ PS4 **Magical Masters Edition** added: the masters Windy and Jimmy Lightning wit
 packs, and the PS4's 1080p art.
 
 It's not an emulator. The PowerPC code of the game's `default.xex` is statically recompiled to C++ with
-[ReXGlue](https://github.com/rexglue/rexglue-sdk) and compiled for the Switch, and the game is drawn by a native
-Vulkan renderer running on NVK (Mesa). The PS4 edition's content is converted from your own PS4 copy into the
-Xbox 360 game's data, and the parts of the PS4 game the Xbox 360 program never had (Windy's and Jimmy's powers) are
-written for the port.
+[ReXGlue](https://github.com/rexglue/rexglue-sdk) and compiled for the Switch, and since 1.0.1 the game is drawn by
+Renut's Direct3D-level renderer ([reNut](https://github.com/masterspike52/reNut) by masterspike52, as banjo-nx
+carries it) directly on the Switch's own graphics API, deko3d. The PS4 edition's content is converted from your own
+PS4 copy into the Xbox 360 game's data, and the parts of the PS4 game the Xbox 360 program never had (Windy's and
+Jimmy's powers) are written for the port.
+
+## What's new in 1.0.1
+
+- **A new renderer:** the game's Direct3D calls are drawn directly with deko3d (no emulated GPU command ring, no
+  EDRAM model, no Vulkan driver in the NRO: it is 10 MB smaller). Faster on the console, so the game now runs at
+  **60 pictures a second by default** (`peggle2_fps = 30` gives the Xbox 360's 30).
+- **Local multiplayer fixed:** in a duel, player 2's controller did nothing (player 2's turns took player 1's
+  controller). Every player now plays with their own controller.
+- **Lower input latency:** the controller is read as late as the frame allows, and the frame pacing follows the
+  screen's refresh.
+- **The shaders for the new renderer are made by the installer** from your copy, like the rest (`deko3d_glsl.bin`).
+- Built with LTO and PGO again (the profile from an emulator session this time).
 
 > [!NOTE]
 > You need your own copies of **both** games:
@@ -40,7 +53,8 @@ Your `peggle2-nx` folder should look like this:
   peggle2.nro
   LICENSES.txt
   peggle2.toml              (your settings; written at the first start when it is missing)
-  peggle2_shaders.mesp      (the game's shaders, made from your copy)
+  deko3d_glsl.bin           (the game's shaders for the deko3d renderer, made from your copy)
+  peggle2_shaders.mesp      (the shaders of the earlier renderer; 1.0.1 does not read them)
   peggle2_shaders.mesp.idx
   game_root.nxpack          (the Xbox 360 game with the PS4 content, in one file)
   game_root.nxidx
@@ -56,11 +70,13 @@ To build everything yourself instead, see [docs/building.md](docs/building.md).
 > **Updating:** open the installer page again and press **Create peggle2-nx-update.zip**. It only holds the new
 > `peggle2.nro` and the shaders, so there is no need to convert the games again: extract it over your folder. Your
 > `peggle2.toml`, your save, the game files and the `cache` folder stay.
+> From 1.0.0: your `peggle2.toml` still says `peggle2_fps = 30`; set it to `60` (the new default) or delete the
+> file so the game writes the new one.
 
 > [!CAUTION]
-> **The first time you play** after installing or updating, the game compiles the graphics pipelines it has not seen
-> yet, so **IT CAN STUTTER for a moment** in new places. They are saved in `cache/` on the SD card and later sessions
-> start smoothly.
+> **The first time you play** after installing or updating, the game compiles the shader variants it has not seen
+> yet, so **IT CAN STUTTER for a moment** in new places. They are saved in `deko3d_shaders.bin` next to the NRO and
+> later sessions start smoothly.
 
 ## What the PS4 edition adds
 
@@ -109,7 +125,7 @@ as one, so handheld + a Pro Controller makes players 1 and 2. Single Joy-Cons ar
 
 | Setting | What it does |
 | --- | --- |
-| `peggle2_fps` | `30` (default): as the Xbox 360 game. `60`: a picture every screen refresh. The game runs at the same speed either way |
+| `peggle2_fps` | `60` (default): a picture every screen refresh. `30`: as the Xbox 360 game. The game runs at the same speed either way |
 | `peggle2_language` | `en`, `de`, `fr`, `es`, `it` or `pt` (Brazilian Portuguese); empty = English |
 | `input_xbox_layout` | Face buttons by position (`true`, default) or by letter (`false`) |
 | `input_joycon_sideways` | Single Joy-Cons held sideways, one per player (`true`, default) |
@@ -126,11 +142,11 @@ mode filtered down to the screen), and switches when you dock or undock.
 
 ## Performance
 
-The game runs at **30 FPS** like the Xbox 360 version, with its 60 logic steps a second. `peggle2_fps = 60` draws a
-picture after every logic step instead of every second one, at the same game speed. How close the console gets to 60
-depends on the scene; where a picture is late, the game shows fewer pictures but keeps its speed.
+The game runs at **60 FPS** by default: a picture after every one of its 60 logic steps a second (the Xbox 360 version
+draws after every second one; `peggle2_fps = 30` does that). How close the console gets to 60 depends on the scene;
+where a picture is late, the game shows fewer pictures but keeps its speed.
 
-The released NRO is built with LTO and with PGO from a console session.
+The released NRO is built with LTO and with PGO (1.0.1: from an emulator session).
 
 ## How it works
 
@@ -138,19 +154,23 @@ The released NRO is built with LTO and with PGO from a console session.
   function of the game's program to C++, which is then compiled for the Switch. ReXGlue also gives the game what it
   expects from an Xbox 360: its system, files, audio and controllers. The port adds the Switch part: memory, threads,
   crash handling, clocks, audio output and showing the frames on screen.
-- **Its own renderer.** Imitating the Xbox 360 GPU was far too slow on the Switch. The port draws the game's frames
-  with Vulkan instead, and the game's Direct3D draw code is replaced by native code that hands the renderer its
-  records directly.
-- **Shaders translated beforehand.** The game's GPU programs are translated with
-  [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) and DXC into one package, made from your copy.
+- **Renut's renderer on deko3d.** Imitating the Xbox 360 GPU was far too slow on the Switch. Since 1.0.1 the game's
+  Direct3D calls are drawn directly by Renut's Direct3D-level renderer ([reNut](https://github.com/masterspike52/reNut)
+  by masterspike52, in banjo-nx's Switch port of it) through [plume](https://github.com/renderbag/plume)'s deko3d back
+  end: no GPU command ring and no EDRAM model. The work per draw is split between the game's thread and a render
+  thread, and only what changed in the Direct3D device is sent for each draw.
+- **Shaders translated beforehand.** The game stores three of its GPU programs; the installer translates them with
+  [XenosRecomp](https://github.com/hedge-dev/XenosRecomp), DXC and SPIRV-Cross into deko3d's GLSL in your browser
+  (`deko3d_glsl.bin`). The three the game compiles at run time (the video shaders) are written for the port and
+  built into the NRO. The console compiles each shader variant once with [uam](https://github.com/devkitPro/uam) and
+  keeps it in `deko3d_shaders.bin`.
 - **The PS4 content.** Both editions use PopCap's resource archive, the PS4's in the other byte order, with its art at
   1080p in console-tiled textures, its sound in ATRAC9 and its masters' powers in code the Xbox 360 program lacks.
   The installer converts the archive's content into the Xbox 360 game's (animations, levels, costumes, videos, sound
   banks), and the port adds the Fairy Flock and Multiball powers, the PS4's screens for seven masters and six
   costumes, and the 1080p art as a pack of atlases laid out like the game's own 720p ones.
-- **Graphics driver.** Vulkan runs on NVK, from the Mesa project, through
-  [mesa-switch](https://github.com/danfromtico/mesa-switch), in the build of
-  [nfsmw-nx](https://github.com/StevensND/nfsmw-nx).
+- **Graphics driver.** deko3d, the Switch's own graphics API from devkitPro; 1.0.0 used Vulkan on NVK (Mesa, through
+  [mesa-switch](https://github.com/danfromtico/mesa-switch)), which the 1.0.1 NRO no longer contains.
 - **Optimization.** The busiest game functions run as translated native code (checked against the original in the
   test builds), the code generator keeps registers in C++ locals and makes calls direct, and the build uses LTO and
   PGO from a console session.
@@ -169,20 +189,20 @@ The released NRO is built with LTO and with PGO from a console session.
 
 ## Build
 
-Windows, LLVM clang 20 and the VS 2022 Build Tools for the PC build; devkitA64 and libnx from
-[devkitPro](https://devkitpro.org) and NVK built from [mesa-switch](https://github.com/danfromtico/mesa-switch) for the
-Switch; Python with numpy, Pillow, lz4 and xxhash; and your own copies of both games. The whole process is in
-[docs/building.md](docs/building.md).
+Windows, LLVM clang 20 and the VS 2022 Build Tools for the PC build; devkitA64, libnx and deko3d from
+[devkitPro](https://devkitpro.org) for the Switch, with uam and SPIRV-Cross built for the PC
+(`tools/deko3d_build_tools.sh`); Python with numpy, Pillow, lz4 and xxhash; and your own copies of both games. The
+whole process is in [docs/building.md](docs/building.md).
 
 <div align="center">
 
 | Folder | Contents |
 | --- | --- |
-| `app/` | The game: hooks, native renderer, native functions, the PS4 powers, settings, CMake project |
+| `app/` | The game: hooks, Renut's renderer (`app/src/renut_engine`), the earlier native renderer, native functions, the PS4 powers, settings, CMake project; `app/thirdparty`: plume, uam, Dear ImGui and Renut's XenosRecomp |
 | `sdk/` | ReXGlue SDK with the Horizon layer and the code generator changes |
 | `shaders/` | XenosRecomp with the ports' changes, and the shader package tools |
 | `tools/` | Code generation steps, build and test scripts, the PS4 content converter (`tools/ps4_dlc/`) and the 1080p art builder (`tools/hd/`) |
-| `mesa/` | Which NVK driver build the NRO links (this port does not change the driver) |
+| `mesa/` | The NVK driver build 1.0.0 linked (1.0.1 has no Vulkan driver) |
 | `docs/` | Documentation |
 
 </div>
@@ -196,14 +216,20 @@ Switch; Python with numpy, Pillow, lz4 and xxhash; and your own copies of both g
 - **[StevensND](https://github.com/StevensND/nfsmw-nx)** — nfsmw-nx: the Switch layer of the SDK, the NVK build and
   much of the method; and [nfsmw-nx-installer](https://github.com/StevensND/nfsmw-nx-installer), the installer page
   this port's is built on.
-- **[nebadasSwifty](https://github.com/nebadasSwifty/masseffect-nx)** — masseffect-nx: the native renderer this port's
-  renderer grew from.
+- **[masterspike52](https://github.com/masterspike52/reNut)** — reNut: the Direct3D-level renderer 1.0.1 draws with
+  (its reuse in this port permitted by its author).
+- **banjo-nx** (Banjo-Kazooie: Nuts & Bolts Switch port) — Renut's Switch port: the deko3d back end of plume, the
+  shader generator and its optimisations, the render-thread and input-latency work.
+- **[renderbag](https://github.com/renderbag/plume)** — plume, the rendering layer Renut draws through;
+  **[fincs](https://github.com/devkitPro/uam)** and devkitPro — deko3d and uam.
+- **[nebadasSwifty](https://github.com/nebadasSwifty/masseffect-nx)** — masseffect-nx: the native renderer of 1.0.0.
 - **[hedge-dev](https://github.com/hedge-dev/XenosRecomp)** — XenosRecomp, the Xenos shader translator.
 - **[danfromtico](https://github.com/danfromtico/mesa-switch)** and **[NaGaa95](https://github.com/NaGaa95/mesa-switch)**
   — mesa-switch: Mesa, NVK and NAK on Horizon.
 - **[devkitPro](https://devkitpro.org) and [switchbrew](https://github.com/switchbrew/libnx)** — devkitA64 and libnx.
 - The sibling ports (Sonic Adventure 2, Banjo-Kazooie: Nuts & Bolts, Sonic & All-Stars Racing Transformed,
-  Mushihimesama Futari), which share their fixes with this one.
+  Mushihimesama Futari), which share their fixes with this one; for 1.0.1 Sonic Adventure 2's renderer CPU work and
+  Mushihimesama Futari's sprite-draw deltas.
 - The other libraries listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Legal
@@ -211,7 +237,7 @@ Switch; Python with numpy, Pillow, lz4 and xxhash; and your own copies of both g
 No affiliation with PopCap Games, Electronic Arts, Microsoft, Sony or Nintendo. "Peggle" is a trademark of PopCap
 Games / Electronic Arts; the icon artwork is © PopCap Games. This repository contains no assets or program code from
 the original games. Users must provide their own legally obtained copies, and everything made from them (`assets/`,
-`app/generated/`, the converted archive, the 1080p art pack, the shader package) is made on their own computer.
+`app/generated/`, the converted archive, the 1080p art pack, the shader packages) is made on their own computer.
 Running homebrew requires custom firmware, which violates Nintendo's ToS and can get a console banned — your call.
 
 Source code is provided under the GPL-3.0 License (see [LICENSE](LICENSE)), like the ports it builds on. The SDK keeps

@@ -51,6 +51,62 @@ CALL = re.compile(r'\b([A-Za-z_]\w*)\(ctx, base\);|\bREX_CALL_INDIRECT_FUNC(?:_A
 # ctx.<register>: its declarations name the registers. A promoted indirect call (tools/indirect_calls.py) names its
 # target's hookable symbol in its PC self-check.
 LEAF_REG = re.compile(r'\bREX_LEAF_LOCAL\(\w+, l_\w+, (\w+)\)')
+# banjo-nx's codegen round (peggle2-nx, 2026-10-19): this tool now runs after it (tools/post_codegen.py), so a copy
+# gets its rewrites too. Two of its forms are taken back to the generator's first:
+#   - tools/inline_memcalls.py wraps a constant-size memcpy / memset call as REX_MEMCPY_CONST(n, sub_X(ctx, base));
+#     (the helper reads its arguments from ctx and runs the call when it must). A copy keeps the plain call (sa2-nx's
+#     and banjo-nx's rule: its registers are locals, synced around calls only), and the index sees the call;
+#   - tools/vec_unaligned_stores.py writes stvlx / stvrx as REX_STVLX / REX_STVRX (stores through REX_RAW_ADDR that
+#     the logged variant would not see): the byte loops again, whose REX_STORE_U8 it logs.
+# The round's LATE rewrites run after this tool in tools/post_codegen.py; CMake's configure step can run it again on
+# the final tree (the Switch cross build has no codegen step: the first Switch build of 2026-10-19 failed on copies
+# that called tools/inline_leaves.py's inl_sub_X, which only the recomp files define). They are taken back out too,
+# so a copy is the same text whenever it is made: REX_INL(sub_X)(ctx, base) (tools/inline_leaves.py),
+# REX_LR_WRITE_SAME (tools/lr_preserve.py), the r1 mirror (tools/r1_local.py), REX_VSEL (tools/vsel_neon.py).
+MEMCALL_WRAP = re.compile(r'\bREX_MEM(?:CPY|SET)_CONST\(\d+, ((?:__imp__)?sub_[0-9A-F]{8}\(ctx, base\))\);')
+VEC_LEFT = re.compile(r'^(\t*)REX_STVLX\(ea, ([\w.]+)\);$', re.M)
+VEC_RIGHT = re.compile(r'^(\t*)REX_STVRX\(ea, ([\w.]+)\);$', re.M)
+INL_CALL = re.compile(r'\bREX_INL\((sub_[0-9A-F]+)\)\(ctx, base\);')
+R1_SUFFIX = re.compile(r' REX_R1_(?:SYNC|KEEP|ASSUMED|RELOAD)\(\);')
+
+
+def unvsel(text):
+    """REX_VSEL(c, a, b) as simde's expression again (tools/vsel_neon.py --restore)."""
+    if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import vsel_neon
+    out, pos = [], 0
+    while True:
+        k = text.find('REX_VSEL(', pos)
+        if k < 0:
+            out.append(text[pos:])
+            return ''.join(out)
+        a, end = vsel_neon.split_args(text, k + len('REX_VSEL('))
+        out.append(text[pos:k])
+        out.append(f'{vsel_neon.HEAD}{a[0]}, {a[1]}), simde_mm_and_si128({a[0]}, {a[2]}))')
+        pos = end
+
+
+def plain(text):
+    """The generator's form of the rewrites above (the late ones first: they were made last)."""
+    if 'REX_INL(' in text:
+        text = INL_CALL.sub(r'__imp__\1(ctx, base);', text)
+    if 'REX_VSEL(' in text:
+        text = unvsel(text)
+    if 'REX_R1_' in text or 'r1l' in text:
+        text = text.replace('\tREX_R1_LOCAL();\n', '').replace('\tREX_R1_LOCAL();', '')
+        text = R1_SUFFIX.sub('', text)
+        text = text.replace('r1l.', 'ctx.r1.').replace('r1l)', 'ctx.r1)').replace('r1l,', 'ctx.r1,')
+    if 'REX_LR_WRITE_SAME(' in text:
+        text = text.replace('REX_LR_WRITE_SAME(', 'REX_LR_WRITE(')
+    if 'REX_MEM' in text:
+        text = MEMCALL_WRAP.sub(r'\1;', text)
+    if 'REX_STV' in text:
+        text = VEC_LEFT.sub(lambda m: '%sfor (size_t i = 0; i < (16 - (ea & 0xF)); i++)\n%s\tREX_STORE_U8(ea + i, %s.u8[15 - i]);'
+                            % (m.group(1), m.group(1), m.group(2)), text)
+        text = VEC_RIGHT.sub(lambda m: '%sfor (size_t i = 0; i < (ea & 0xF); i++)\n%s\tREX_STORE_U8(ea - i - 1, %s.u8[i]);'
+                             % (m.group(1), m.group(1), m.group(2)), text)
+    return text
 PROMOTED = re.compile(r'\bREX_PROMOTED_CALL\(0x[0-9A-F]{8}, (sub_[0-9A-F]{8})\)')
 LABEL = re.compile(r'^(loc_[0-9A-F]+):\s*$')
 DEF = re.compile(r'^DEFINE_REX_FUNC\((\w+)\) \{$')
@@ -108,6 +164,7 @@ def build_index(gen):
                 continue
             if line.lstrip().startswith('//'):
                 continue
+            line = plain(line)  # a wrapped memcpy / memset call is a call (banjo-nx's round)
             f = funcs[name]
             for m in REG.finditer(line):
                 f[0].add(m.group(1))
@@ -257,7 +314,7 @@ def find_body(gen, name):
         text = open(path, encoding='utf-8', errors='replace').read().replace('\r\n', '\n')
         m = re.search(r'^DEFINE_REX_FUNC\(' + name + r'\) \{\n(.*?)^\}\n', text, re.S | re.M)
         if m:
-            return unleaf(m.group(1)), path
+            return unleaf(plain(m.group(1))), path
     return None, None
 
 
@@ -272,9 +329,12 @@ def unleaf(body):
     names = re.compile(r'\bl_(%s)\b' % '|'.join(re.escape(r) for r in regs))
     out = []
     for l in body.split('\n'):
-        if re.match(r'\tREX_LEAF_LOCAL\(', l) or re.match(r'\t(?:REX_LEAF_STORE\(l_\w+, \w+\);\s?)+$', l):
+        # REX_LEAF_DEAD_R / _F (tools/leaf_dead_stores.py) are write-backs no caller reads: in the ctx form every
+        # register is written where the function writes it, so they go like the stores (sa2-nx, banjo-nx).
+        if re.match(r'\tREX_LEAF_LOCAL\(', l) or \
+                re.match(r'\t(?:REX_LEAF_(?:STORE|DEAD_R|DEAD_F)\(l_\w+, \w+\);\s?)+$', l):
             continue
-        l = re.sub(r'\{ (?:REX_LEAF_STORE\(l_\w+, \w+\); )+return; \}', 'return;', l)
+        l = re.sub(r'\{ (?:REX_LEAF_(?:STORE|DEAD_R|DEAD_F)\(l_\w+, \w+\); )+return; \}', 'return;', l)
         out.append(names.sub(lambda m: 'ctx.' + m.group(1), l))
     if 'REX_LEAF_' in '\n'.join(out):
         sys.exit('localize_native: a leaf-local form this tool does not know (tools/leaf_locals.py changed?)')

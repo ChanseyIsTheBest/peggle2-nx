@@ -19,6 +19,12 @@
 #include "me/me_native_system.h"
 #include "me/peggle2_render_mode.h"
 #endif
+#if PEGGLE2_RENUT_RENDERER
+#include <rex/ui/immediate_drawer.h>
+#include "renut_engine/gpu/banjo_renut_capture.h"
+#include "renut_engine/gpu/banjo_renut_select.h"
+#include "renut_engine/gpu/overlay/app_integration.h"
+#endif
 #include "peggle2_capture.h"
 #include "peggle2_enhancements.h"
 #include "peggle2_input_script.h"
@@ -169,6 +175,16 @@ class Peggle2App : public rex::ReXApp {
     // Test runs: a scripted controller (peggle2_input_script), added only when the script is set.
     config.input_factory = peggle2::input_script::Wrap(std::move(config.input_factory));
     peggle2::enhancements::ApplyGpuBoost();  // peggle2_gpu_boost (the Switch in handheld mode only)
+#if PEGGLE2_RENUT_RENDERER
+    // peggle2_renderer = "renut" (2026-10-19): Renut's Direct3D-level renderer (reNut by masterspike52, as banjo-nx
+    // carries it; src/renut_engine/gpu). No SDK graphics system and no GPU plugin: the renderer is the app's (the
+    // SDK's detached mode); it starts in OnFinalizePaths, when the window exists. No PM4 ring, no EDRAM model.
+    if (banjo::renut_gpu::Active()) {
+      renut::gpu::ConfigureRuntime(config);
+      REXLOG_INFO("graphics: Renut's Direct3D-level renderer (plume; no PM4 ring, no EDRAM model)");
+      return;
+    }
+#endif
 #if PEGGLE2_NATIVE_RENDERER
     // Stage 4: with masseffect_renderer_native = true the graphics system is the app's own native Vulkan renderer
     // (src/me), and the emulated Xenos GPU plugin is not loaded (ReXApp only loads it when config.graphics is empty).
@@ -182,6 +198,12 @@ class Peggle2App : public rex::ReXApp {
   // Video recording of the game image for testing (peggle2_video_s = N seconds after start; 0 = off). Taken from the
   // presenter's guest output, so it works minimized and nothing can cover it.
   void OnPostSetup() override {
+#if PEGGLE2_RENUT_RENDERER
+    // Renut's renderer has no SDK presenter: its Present reads the frame back (banjo_renut_capture.h).
+    if (banjo::renut_gpu::Active()) {
+      peggle2::capture::StartGrabber([](rex::ui::RawImage& image) { return renut::gpu::CaptureFrame(image); });
+    } else
+#endif
     peggle2::capture::Start([this]() -> rex::ui::Presenter* {
       const auto* rt = runtime();
       const auto* graphics = rt ? rt->graphics_system() : nullptr;
@@ -202,7 +224,28 @@ class Peggle2App : public rex::ReXApp {
     peggle2::pgo::Start();
   }
 
+#if PEGGLE2_RENUT_RENDERER
+  // Renut's renderer draws the SDK's ImGui through its own plume drawer, and resizes its swapchain itself.
+  std::unique_ptr<rex::ui::ImmediateDrawer> OnCreateImmediateDrawer() override {
+    if (banjo::renut_gpu::Active()) return renut::gpu::CreateOverlayDrawer();
+    return rex::ReXApp::OnCreateImmediateDrawer();
+  }
+  void OnWindowPixelSizeChanged(uint32_t pixel_width, uint32_t pixel_height) override {
+    rex::ReXApp::OnWindowPixelSizeChanged(pixel_width, pixel_height);
+    if (banjo::renut_gpu::Active()) renut::gpu::OnWindowResized();
+  }
+  // The window exists here: Renut's renderer comes up before the game starts.
+  std::optional<rex::PathConfig> OnFinalizePaths(const rex::PathConfig& defaults,
+                                                 std::function<void(rex::PathConfig)> resume) override {
+    if (banjo::renut_gpu::Active()) renut::gpu::StartRenderer(app_context(), [this] { return imgui_drawer(); });
+    return rex::ReXApp::OnFinalizePaths(defaults, std::move(resume));
+  }
+#endif
+
   void OnShutdown() override {
+#if PEGGLE2_RENUT_RENDERER
+    if (banjo::renut_gpu::Active()) renut::gpu::ShutdownRenderer();
+#endif
     peggle2::enhancements::StopReport();
     peggle2::pc_profiler::Stop();
     peggle2::capture::Stop();

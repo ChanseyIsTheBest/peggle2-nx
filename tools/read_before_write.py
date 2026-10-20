@@ -49,7 +49,9 @@ REG = (r'r(?:1[4-9]|2[0-9]|3[01])|f(?:1[4-9]|2[0-9]|3[01])|'
 tok = re.compile(r'(?<![.\w])(' + REG + r')\b')
 # After tools/args_in_registers.py (or the codegen option args_in_registers) the body of a function that has direct
 # callers lives in `extern "C" ... __fast_sub_X(...) {`; the DEFINE_REX_FUNC of such a function is only a wrapper.
-fn_re = re.compile(r'^(?:DEFINE_REX_FUNC\((sub_[0-9A-F]+)\)|extern "C" (?:uint64_t|void) __fast_(sub_[0-9A-F]+)\(.*\) \{)')
+# Every function, named ones too (from banjo-nx, 2026-10-07: the CRT's named SEH funclets; in Peggle the
+# __savegprlr_N / __restgprlr_N helpers and xstart are named).
+fn_re = re.compile(r'^(?:DEFINE_REX_FUNC\(([A-Za-z_][A-Za-z0-9_]*)\)|extern "C" (?:uint64_t|void) __fast_(sub_[0-9A-F]+)\(.*\) \{)')
 lab_re = re.compile(r'^(loc_[0-9A-F]+):$')
 goto_re = re.compile(r'^goto (loc_[0-9A-F]+);$')
 ifgoto_re = re.compile(r'^if \(.*\) goto (loc_[0-9A-F]+);$')
@@ -175,7 +177,8 @@ def build_cfg(body):
         if m:
             succ[i] = nxt + ([labels[m.group(1)]] if m.group(1) in labels else [])
             continue
-        if s == 'return;' or s == 'return r3.u64;' or s.startswith('__builtin_trap()') or s.startswith('REX_FATAL('):
+        # ppc_longjmp: the guest's `bl longjmp` (setjmp_address/longjmp_address in the config), [[noreturn]] (banjo-nx)
+        if s == 'return;' or s == 'return r3.u64;' or s.startswith(('__builtin_trap()', 'REX_FATAL(', 'ppc_longjmp(')):
             succ[i] = []
             continue
         if s.startswith('switch ('):
@@ -264,7 +267,11 @@ def analyze(cfg, noreturn):
         if u:
             # a plain store of the value to memory (a hand-written save, e.g. stvx v127 in a
             # prologue) is harmless with locals; anything else uses the value
-            is_store = lines[i].startswith(('REX_STORE_', 'simde_mm_store'))
+            # (a simde_mm_store* into a REGISTER is how every vector instruction writes its result, and its
+            # operands are real reads: only a store to guest memory, REX_RAW_ADDR/base, is a save. From banjo-nx,
+            # 2026-10-07: before, every vector read was dropped here.)
+            is_store = lines[i].startswith('REX_STORE_') or (lines[i].startswith('simde_mm_store') and
+                                                            ('REX_RAW_ADDR(' in lines[i] or '(base +' in lines[i]))
             tgt = stores if is_store else bad
             if WHY:
                 lab = next((lines[j] for j in range(i, -1, -1) if lab_re.match(lines[j])), 'entry')

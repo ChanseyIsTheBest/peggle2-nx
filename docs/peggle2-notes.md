@@ -2544,3 +2544,662 @@ base it on mushi futari because it fixed a web assembly shader issue".
   now names this NRO, the library `ce8dab77...` and the recipe `239ebb2e...`.
 - **To do by the user**: the console run of the zip; then publishing the peggle2-nx release with `peggle2.nro` and
   `peggle2_hd_recipe.json.gz` as assets (the installer's deployment downloads both and checks their SHA-256).
+
+## banjo-nx's codegen round (2026-10-19)
+
+The user asked for banjo-nx's new codegen improvements, all at once, then verified. Source: banjo-nx's
+`docs/codegen-enhancements.md` (steps 15-33) and its SDK. Peggle's 1.0.0 had steps 1-14 (sa2-nx's rounds).
+
+**Generator** (the SDK, ported by a helper agent; default output byte-identical to before, 241 files, old and new
+generator; 13 SDK tests pass, the 4 new ones included: `vec_unaligned_test` 640,000, `memcalls_test` 403,559,
+`fp_sign_ops_test` 96 M, `single_floats_test` 60 M comparisons, 0 differences):
+
+| Change | In Peggle | Effect |
+|---|---|---|
+| `dcbt` operands decode as {CT, RA, RB} (`emit_prefetch`) | fix in; `dcbt_prefetch` stays off | (only with the option) |
+| `rotate_word_shifts` | on | 8,171 functions; rlwinm / rlwimi as one shift / extract where the mask allows; all 54,370 sites' 12,343 distinct statements checked against the 64-bit definition |
+| `fp_copy_forwarding` | on | copy-form stores 30 -> 5,328, loads 178 -> 3,648; flush-mode check statements 11,399 -> 10,296 |
+| `setjmp_save_locals` (new option; sa2-nx's fix, always on in banjo-nx) | on | a CORRECTION: the 12 setjmp sites copy the non-volatile locals into the jump buffer and back after a longjmp |
+| `non_volatile_as_local_keep` / `_exclude` | mechanism only | not used |
+| FPSCR rounding census (`kCensusRoundNearest/Zero/UpDown`, `PPCFPSCR::storeFromGuest`) | in (PC) | the `[census] FPSCR rounding mode` line |
+
+**Post-codegen steps** (`tools/post_codegen.py`; each with its CMake switch back, `PEGGLE2_GEN_*`; counts of the
+fresh codegen):
+
+| Step | Tool | Count |
+|---|---|---|
+| narrow loop barrier (the guest window, 4 GB + 4 KB, not all memory) | `loop_barriers.py` | 20,205 barriers |
+| a vperm of one vector as one lookup | `vperm_one_source.py` | 173 (831 two-source left) |
+| fneg / fabs / fnabs as float operations | `fp_sign_ops.py` | 688 |
+| leaf write-backs no caller reads skipped | `leaf_dead_stores.py` | 2,344 of 22,161, in 373 functions |
+| single-precision arithmetic in float where the inputs are proven singles | `single_floats.py` | 8,649 of 15,955 |
+| memcpy / memset of 1-64 constant bytes inline | `inline_memcalls.py` | 278 of 1,095 memcpy, 154 of 673 memset |
+| stvlx / stvrx without byte loops | `vec_unaligned_stores.py` | 650 + 159 |
+| read-only constants over the control-flow graph | `ro_constants_cfg.py` | 1,463 loads |
+| guest register writes nothing reads left out (`--abi-indirect`) | `dead_ctx_defs.py` | 4,556 plain + 1,782 record forms, 2,931 functions |
+| loop-header flush checks hoisted in front of the loop | `flush_hoist.py` | 260 loops in 133 functions |
+| link-register write-backs proven redundant (STRICT, see below) | `lr_preserve.py` (+ `frame_traffic.py` marks) | 2,617 of 13,098 sites |
+| VMX vsel as one NEON bit select | `vsel_neon.py` | 87 |
+| tiny leaves of other files as inline copies | `inline_leaves.py` | 4,779 calls to 2,669 copies |
+| locals opt-out list (A57 cost, `locals_choice.py`) | `app/config/locals_optout.txt` | 82 loop + 27 leaf functions |
+| r1 as a local mirror in the chosen functions (`app/config/r1_local_choice.json`) | `r1_preserve.py` + `r1_local.py` | 12,637 functions |
+| unchanged generated files keep their times | `post_codegen.py` (`keep_unchanged_times`) | |
+
+The localized copies (`localize_native.py`) now come after the round, so the 47 copies get it too.
+
+**The two choice lists** (`tools/locals_choice.py`, banjo-nx's A57 cost model: every changed file compiled twice with
+the Switch dev build's command line, per function the loop-weighted cost sum(w * (1 + is_mem)), w = 10 inside a cycle
+of the control-flow graph; static, not samples). Peggle's copy got `--mode r1 | lr | round` (form B with that step's
+switch back; the modes share form A with `--reuse`). Measured on a copy processed with `PEGGLE2_R1_LOCAL_ALL=1`
+(`out/choice`):
+
+- loop / leaf locals: the 4,029 changed functions cost 6.73 % less with the locals than without; 109 are cheaper
+  without by more than 2 % (82 loop, 27 leaf; the worst `sub_8252B368` +15.8 %, `sub_825255E0` +40 %): opted out,
+  -0.49 % more.
+- r1 mirror (`r1_local.py`, 24,552 candidate functions): everywhere a loss, +0.41 % (banjo-nx: +0.33 %); cheaper in
+  12,637 (`--threshold 0`), which are the list: -0.76 % against no mirror. On the PC every assumed call is checked
+  (`REX_R1_CHECK`).
+- `lr_write_same_choice.json`: not made (`--mode lr` exists, not run); every strictly proven site is kept.
+
+A change of either list needs a fresh codegen (`tools\codegen.ps1`): the locals tools never undo a function.
+
+**Not taken**: `hot_layout.py` (the release build's PGO already places the hot functions); `switch_goto.py` (Banjo's
+script interpreters; none in Peggle's hot list); `limiter_lazy_log10.py` (XAudio's limiter; Peggle's audio is
+Wwise); `store_cards.py` (Banjo's renderer); `dcbt_prefetch` (not measured); `HostToGuestFunction` always-inline
+(runtime hook shim, not codegen).
+
+**What had to change for Peggle** (beyond paths: `app/generated/default`, `peggle2_pch.h`, `out/default_image.bin`,
+the entry point `xstart` 0x823186D0, the CRT memcpy `sub_825F0AE0` / memset `sub_825F10B0` in the new
+`app/src/cpu/hot/hand.txt`):
+
+- **The game patches are opaque.** `mp_masters.py`, `fps_updates.py` and `costume_states.py` insert host calls with
+  `&ctx` (one runs guest code), gotos the shared parser misreads (`{ ... if (..) goto loc_X; }` taken for an
+  unconditional goto) and a label it does not know (`peggle2_costume_unlocked_only`). They now run right after
+  `leaf_locals.py`, and every function with their `// peggle2-nx:` line counts as opaque
+  (`leaf_dead_stores.OPAQUE_MARK`): each of its instructions reads every register (so its callees' LiveOut and its
+  own UE are everything and nothing in it is dead), the forward analyses skip it (`single_floats`,
+  `ro_constants_cfg`: "6 functions not analysed"), `lr_preserve` / `r1_preserve` take it for not preserving, and
+  `r1_local`, `flush_hoist`, `inline_leaves` leave it alone.
+- **A second run gave other code (found by a two-run hash check on a copy).** banjo-nx's `post_codegen.py` takes
+  only its late rewrites back out first. On Peggle the round's earlier forms changed what the base steps decided on
+  a second run: `loop_barriers.py` did not read a return written `{ REX_LEAF_STORE(..); REX_LEAF_DEAD_R(..);
+  return; }` (10 files got other barriers), `flush_mode_flow.py` proved 12 more checks and `ro_constants.py` folded
+  17 more vector loads, and `flush_hoist.py` then hoisted 293 loops instead of 300. New `tools/round_restore.py`
+  undoes the rest of the round (each the inverse of its tool's rewrite) before the base steps. And
+  `inline_leaves.py --restore` left the empty line it had inserted, one more per run in every file (fixed). Now two
+  runs give the same 122 files byte for byte.
+- **`lr_preserve.py --assume-indirect` is not true here.** Functions that end through `__restgprlr` (the generator
+  drops the helper) never write ctx.lr back, and indirect and hooked calls reach them. The PC check
+  (`REX_LR_WRITE_SAME_CHECK`) found 1,473 of 68 M checked write-backs wrong in 150 s with the assumption (7,603
+  sites). Strictly (no assumption about indirect, hooked or import calls): 2,617 sites, 0 of 35 M wrong. Little
+  reads ctx.lr in Peggle (its logging hooks, whose call sites set it; the localized copies' guard compares it), but
+  the proof has to hold.
+- **The localized copies must not depend on when they are made.** CMake's configure step makes them again when
+  `localize_native.py` or `localized.txt` is newer than the hooks file, on the final tree; the Switch cross build
+  (no codegen step) failed on copies that called `inline_leaves.py`'s `inl_sub_X`. `localize_native.plain()` now
+  takes every later form back out (REX_INL calls, REX_LR_WRITE_SAME, the r1 mirror, REX_VSEL, the memcall wrappers,
+  REX_STVLX / REX_STVRX as the logged byte loops) and `unleaf()` drops REX_LEAF_DEAD_R / _F like the stores: copies
+  made from the final tree equal those made in the pipeline (47 of 47, only the source line of the header differs).
+- `direct_calls.py`: banjo-nx's `#` comments in tomls and CMakeLists.txt are no hooks; `non_argument_as_local_keep`
+  in `perf_overrides.toml` neither. `leaf_locals.py` / `loop_locals.py`: banjo-nx's opt-out list (Peggle already had
+  vector registers as values, banjo-nx's `REX_VECTOR_LOCALS_BY_VALUE`). The two audits got banjo-nx's fixes.
+- PC checks of the late proofs: `REX_LR_WRITE_SAME_CHECK` and `REX_R1_CHECK` (non-Switch builds, as RexRoCheck),
+  counted in `src/cpu/peggle2_codegen_checks.cpp` for a `[verify]` line.
+
+**Verification (PC unless said)**. The final build (fresh codegen with both choice lists): verify mode 0 DIFFERENCE
+/ MISMATCH lines; guard checks 137 M, flush checks 344 M, read-only folds 42.7 M, the r1 mirror checked after 67 M
+calls and 38.6 M link-register write-backs, all 0 differences; lockstep 123 of 123 (117 at the same game frame) in a
+second capture (the first, while another port's game and a build ran, missed 17 frames of the menu fade-out, the
+host-timed frames the notes know). The PC build's own codegen re-run gave 297 of 297 generated files identical to
+`tools\codegen.ps1`'s. Switch dev NRO: `out/dist/dev_20261019_banjo_round/peggle2.nro` (48,569,930 bytes, SHA-256
+`a185b338...07f3`; ELF `out/nx/elf/peggle2_banjo_round_choice_nolto_20261019.elf`), `check_switch_build.py` all checks
+passed. A57 census of the recompiled code against the last no-LTO build before 1.0.0: instructions -0.81 %, loads
+-3.28 %, `msr fpcr` -11.0 %, `bl` -3.0 %, stores +0.04 %, sp loads + stores +2.2 % (the r1 mirror's spills). A release
+needs a new PGO profile (the code changed) and the console run.
+The earlier stages of the same work (before the choice lists):
+
+- Verify mode, 150 s scripted route, fresh save: 0 DIFFERENCE / MISMATCH lines; guard checks 147 M, 0 differences;
+  354 M proven flush checks executed (the hoisted ones included), 0 had to switch; 47 M read-only folds (both
+  steps), 66 M promoted calls, 0 differences; 35 M link-register write-backs proven redundant, 0 differences.
+  (A first run with the assumed lr proofs also showed one native WindowScissor record difference; it did not come
+  back in the next run, 63,426 compared.)
+- **Poison build** (`PEGGLE2_GEN_LEAF_DEAD_POISON=ON`, `PEGGLE2_GEN_DEAD_DEFS_POISON=ON`: every skipped write-back
+  and left-out write gets 0xDEADBEEF... / a signalling NaN): verify mode 0 differences (121 M guard checks); lockstep
+  against the CPU-off baselines `ls_fresh_off1/2`: **123 of 123** reproducible frames (107 at the same game frame),
+  none missing.
+- Normal build lockstep: **123 of 123** (119 at the same game frame), none missing, during a background compile
+  (1.0.0's final build: 122 of 123).
+- FPSCR census (fp_sign_ops is exact only without round-up / round-down): 54 guest writes, all to nearest; 0 toward
+  zero, 0 up or down.
+- PS4 content (`mod_test.ps1`, `game_root_mod_mp`): menus to Bjorn's first level, no DIFFERENCE. 60 fps
+  (`peggle2_fps = 60`): 57.8-60.9 logic updates a second (the frame-step patch).
+- Switch dev build (`out/nx_dev`, no LTO / PGO; `out/nx/elf/peggle2_banjo_round_nolto_20261019_2013.elf`):
+  `check_switch_build.py` all checks passed (one `b .`, the known guest halt; no vector fused multiply-add; no
+  self-indexed table lookup; `-mearly-ra=none` in all 688 compile commands).
+- A57 census of the recompiled code (`sub_*`, `__imp__sub_*`, `inl_sub_*`; static counts, not weighted by how often
+  they run), against the last no-LTO build before 1.0.0 (`peggle2_guardoff_nolto_20261014_1438.elf`): instructions
+  -0.11 %, stores -0.30 %, sp loads + stores -0.29 %, `msr fpcr` 6,297 -> 5,614 (-10.9 %), `bl` -2.9 %; loads
+  +0.55 % and `blr` +3.5 % (inline copies of memcpy / leaves). At run time the PC census shows the same ~140,000
+  flush-mode switches a second on the route as on 2026-10-13: the removed `msr fpcr` are not on its hot paths.
+
+## Renut's renderer on deko3d (2026-10-19/20, night)
+
+The user asked for "a fully functional deko 3d native renderer with no ring emulation or edram emulation", based on
+banjo-nx (its emulator code and its optimised shader generator), tested in the emulator banjo-nx tests in. The renderer
+is **Renut's Direct3D-level renderer** — reNut by masterspike52 (the author permitted its reuse in the user's ports),
+as banjo-nx carries and has optimised it (`app/src/renut_engine/gpu`, plume on Vulkan / deko3d). It hooks Peggle 2's
+Direct3D functions and draws their calls directly: no PM4 ring is written or parsed (ring writes go to a sink), no
+EDRAM is modelled (render targets are host textures), fences complete on the render thread.
+
+**Choosing it** (one NRO, both renderers; the built-in default stays the native renderer):
+
+| Key | Value | |
+|---|---|---|
+| `peggle2_renderer` | `"renut"` | read once at boot (`"native"`: the native renderer, as before) |
+| `renut_gpu_backend` | `"deko3d"` (Switch), `"vulkan"` (PC) | |
+| `masseffect_renderer_native` | `false` | |
+
+`app/configs/peggle2_renut_deko3d.toml` (written by `tools/make_enhancement_configs.py`) is every enhancement on, logs
+on, these three keys, and the release's picture: 720p handheld, 1080p docked, the HD atlases always. Renut follows
+Peggle 2's own `peggle2_render_height_handheld` / `_docked` (`peggle2_renut_resolution_by_mode`) and shows the HD
+atlases as the native renderer does (below).
+
+### How it was brought in
+
+- **Files from banjo-nx** (its copies, with banjo-nx's changes): `app/src/renut_engine/gpu/**`, `display_sync`,
+  `perf/frame_stats`, `app/thirdparty/{plume,uam,reblue-XenosRecomp,imgui}`, `app/cmake/collect_captured_shaders.cmake`,
+  the deko3d tools (`tools/deko3d_*.py`, `renut_early_alpha.py`, `renut_switch_shader_cache.py`), the SDK's
+  `frame_latency`, `MarkStoreCardsAt` (unused: Peggle has no store cards, `g_banjo_store_cards = false`). Build glue:
+  `app/cmake/peggle2_renut_gpu.cmake`, `app/src/renut_engine/peggle2_renut_glue.cpp` (banjo-nx's keys and symbols the
+  tree expects), `option(PEGGLE2_RENUT_RENDERER ON)`.
+- **Hooks** (`tools/renut_hook_remap.py`, `out/renut_port/hook_map.md`): Renut's 371 hooks are at N&B's addresses;
+  319 were matched to Peggle's functions by shape, 42 have no Peggle counterpart (tiling, command-buffer recording,
+  Present, ...: kept under `#if 0`), 10 are addresses Peggle's native renderer hooks too (`BANJO_RENUT_HOOK_SHARED`:
+  the native hook calls Renut's side when it is chosen, `tools/renut_yield_hooks.py`). Swap keeps its frame count.
+- **Device layout** (`out/renut_port/device_offsets.md`, a helper agent's re-derivation from 356 paired functions):
+  Peggle's XDK 21256 has the same public device (0..0x2A70) as N&B's but MaxAnisotropy / ZFilter moved into it, and
+  every private field moved by +128..+412 (no single delta). `tools/renut_device_offsets.py` rewrote the 176
+  hard-coded offsets (152 lines; e.g. kDeviceAllocSize 0x5E00 -> 0x6080, VertexDeclaration 0x2E2C -> 0x2FD0,
+  kDeviceSnapshotSize 0x31A8 -> 0x3320) and the guest data addresses (state tables 0x828DFDB8 / 0x828E0278, format
+  table 0x8207A590, caps 0x8207AA80, HiZ owner 0x82D7509C, XMemFree sub_823189E8, GetCurrentThreadId sub_8260BF88).
+- **Where Peggle's Direct3D differs from N&B's** (each fixed in Renut, marked `peggle2-nx`):
+
+| What | Symptom / reason | Fix |
+|---|---|---|
+| The post-codegen direct-call pass had turned calls into `__imp__sub_X` before Renut's hooks existed | Renut never ran (the real CreateDevice called `VdInitializeRingBuffer`; "Record heap used before Init"; draws with vertex shader 0) | `tools/direct_calls.py` skips `#if 0` blocks (the disabled N&B hooks named unrelated Peggle functions); codegen run again; 0 calls bypass any of the 319 hooks |
+| Public `D3DDevice_Resolve` is a wrapper (sub_82622140) around an internal resolve with two more arguments | every resolve argument shifted (destination 0): Swap found no front-buffer texture, nothing presented | the hook sits on the wrapper |
+| SetFVF (sub_82613570) rebuilds the declaration inside the device (+0x3118) | "Draw dropped: vertex declaration ... not one the renderer knows" | `render/draw.cpp` DeviceDeclarationLocked: its elements from the draw's device snapshot |
+| A 32-byte block at device+11028 (InitializeHardwareDevice) | unhooked fence / interrupt paths dereference it | Renut's device gets one |
+| SetTexture(NULL) clears the fetch constant's type bits; BeginExport always draws the NaN vertex when no export is active | | as Peggle's code |
+| Renut's SynchronizeToPresentationInterval does not wait | 600-1,200 frames a second with a minimised window | Peggle's Swap hook waits for the interval the game set (+14000; `peggle2_renut_swap_pacing`) |
+| Renut never applies the game's display gamma ramp (present exponent 1) | brighter darks than the native renderer (19 -> 35 of 255) | the ramp's least-squares power (x^1.172 for Peggle) in the present (`peggle2_renut_display_ramp`) |
+| Without store cards every never-unlocked linear texture is hashed in full each frame it is bound (Peggle's 4096x4096 atlases: 72 MB a frame) | 71 % of the render thread (PC profile: `XXH3_hashLong` in `ContentHash`) | rechecked after 2, 4 ... 32 frames while unchanged, as the native renderer does (`peggle2_renut_texture_backoff`); the loader's row copy reports its texture (`src/peggle2_texture_writes.cpp`) |
+| Renut's render scale is `renut_resolution`, and deko3d is held at 1x (banjo-nx's shaders lose the scale code in its `scale1` / `fragscale` passes) | 720p docked | the scale follows Peggle's height for the console's mode (`render/surfaces.cpp`, `peggle2_renut_resolution_by_mode`: 720 -> 1x, 1080 -> 1.5x), deko3d included: Peggle's six shaders read no scale code and no `resolution_scale` (checked in their GLSL), and plume binds a texture word's low 20 bits only |
+| plume's deko3d swapchain takes the default NWindow's size, 1280x720 in both modes | a 1080p frame scaled down to 720p, then up by the compositor | `plume::g_deko3dWindowSize` (set in `peggle2_renut_glue.cpp` from `peggle2::render::Docked()`): the window is given 1920x1080 docked before the swapchain is made |
+| Bink decodes the next video frame into the plane set the frame just submitted draws; Renut reads texture data on its render thread after the Swap (one frame may still be queued) | the native renderer's "spots in videos" of 2026-10-13, here possible too | the video update (`src/peggle2_texture_writes.cpp` VideoUpdate) drains Renut's render thread first, as it waits for the native ring; videos only (the intro logos played frame by frame right at 1-second shots) |
+| The HD atlases are the native renderer's (its texture upload) | the 720 art at 1080p | `render/textures.cpp` UploadMaybeHd: a 2D linear BC3 one-level texture's XXH3-64 (the same bytes as the native's key) looked up in `peggle2_hd.pack` at each content upload; the host texture is made at the HD size and filled from the pack in 8 MB bands, and back at the guest size for content the pack lacks |
+
+- **Shaders**: Peggle 2 has 6 (4 pixel, 2 vertex); three are stored in the XEX, the Bink movie trio is compiled at
+  boot by D3DXCompileShader (corrected later the same day; `tools/renut_shader_dump.py` dumps them). banjo-nx's
+  generator: XenosRecomp -> SPIR-V (PC cache) -> SPIRV-Cross GLSL -> `deko3d_glsl_opt.py` -> `deko3d_shader_package.py`
+  (`deko3d_glsl.bin`, in the NRO; its zstd dictionary is the shaders' own text when 6 samples are too few to train on).
+  uam compiles the variants on the device: 9, kept in `deko3d_shaders.bin` next to the NRO (7.5 KB).
+- **Ryujinx** (banjo-nx's fork, this port's own data folder `D:\New folder\ryu-data\peggle2`, SD folder a junction to
+  the existing one): four SDK changes from banjo-nx let the NRO run without a loader — the NRO's usual SD path when
+  argv is empty (`REX_SWITCH_FALLBACK_EXE`), the current-process pseudo-handle, guest-memory views mapped at commit and
+  no page protection (no data aborts reach homebrew in Ryujinx), and the heap from all free memory. On a console
+  hbloader passes argv, the handle and the heap, so nothing changes there.
+
+### Results
+
+- **PC, Vulkan** (`out/pc`, minimised, shots every N s through `peggle2_shots_every_s`): the scripted route from a fresh
+  save (EA and PopCap videos, the autosave notice, title, Bjorn's map, the first level and its tutorial), and a play
+  route from `seed_noach` (A every 2.5 s: menus, Adventure, Bjorn's map, a level played with shots, power wheels,
+  "3 / 2 BALLS LEFT!", "LAST BALL!", the retry dialog). 30 pictures a second; no draw dropped, no Swap without an
+  image. Render thread 0.5-0.9 ms and GPU 0.9-1.8 ms a frame in a level (the render thread was 8 ms before the
+  texture back-off). Against the native renderer, same route, a static tutorial frame: mean difference 3.4-5.2 of
+  255 per channel with the display ramp (14.5 without), the rest is animation timing.
+- **Ryujinx, deko3d** (the NRO of `out/dist/dev_20261020_renut_deko3d`): the same two routes, frame for frame what
+  the PC shows. The 9 shader variants are compiled once by uam in the NRO (4-23 s each under emulation at first; ~0.4 s
+  on a console by banjo-nx's measurements, ~0.6 s in its emulator runs) and read from `deko3d_shaders.bin` after. 15-30 pictures a second and a render
+  thread of 1-5 ms a frame under emulation (16 ms before the back-off). Vertex colours were red/blue-swapped in the
+  emulator only (it ignored Maxwell's vertex-format swap bit, deko3d's `isBgra`, which plume sets for D3DCOLOR;
+  banjo-nx patched the shared fork at 01:44 and the frames now match the PC's). One of six runs ended with Ryujinx
+  itself failing (0xC0000005 in its JIT, right after Single Player, while three other ports ran instances): not seen
+  again in the next runs of the same route. In its HostMappedUnsafe mode a guest access to an unmapped page ends the
+  emulator, where a console's fault handler maps the page (RexGmFaultIn) — so a stale read of freed guest memory
+  would look like this; not investigated further.
+- **The native renderer is unchanged**: verify mode 0 differences (142.7 M checks; 0 DIFFERENCE / MISMATCH lines);
+  lockstep against the CPU-off baselines **123 of 123** (105 at the same game frame), none missing (a first run
+  that overlapped a Ryujinx run gave 89 of 123: load, not a change). Again on the final build (with the 1080p and
+  HD-atlas work): verify 174.8 M checks, 0 differences; lockstep 123 of 123 (108 at the same game frame).
+- **Screens seen through Renut** (PC and Ryujinx): EA / PopCap videos, autosave notice, title, main menu, Adventure,
+  Peggle Institute, Select a Master, Bjorn's map, level intro, the tutorial, play (shots, bucket, power wheels, "N BALLS
+  LEFT!", "LAST BALL!"), "TRY AGAIN" with its rainbow, the retry; later the same day (PC) Extreme Fever, VICTORY and
+  the change of level (below). Not reached by the scripted routes: the multiplayer lobby (the main menu takes no
+  scripted DOWN or stick press there).
+- **Switch build** (`out/nx_dev`, no LTO, no PGO): `check_switch_build.py` all checks passed. A57 census against
+  2026-10-19's dev ELF: game code +0.18 % instructions, +0.26 % `bl`, +309 functions (the hook dispatchers: one
+  byte load and a branch before the original when the native renderer runs); the rest of the program +17.6 %
+  (Renut, plume, uam); NRO 48.6 -> 52.1 MB.
+- **1080p and the HD atlases**: PC, simulated docked mode (`peggle2_render_docked`): Renut at 1920x1080 against
+  the native renderer at 1920x1080 (both without the pack): mean difference 4.5-5.1 of 255 per channel, the HUD and
+  text as sharp; with the pack (pack6) 16 atlases a level shown from it (1024x2048 -> 1536x3072, 4096x4096 ->
+  6144x6144, 7-29 ms each to read). Ryujinx docked (the profile's `docked_mode`, set for one run and put back):
+  swapchain 3 x 1920x1080, render 1920x1080, 23-30 pictures a second; handheld with `peggle2_hd_atlases = 2` (the
+  release's setting): 16 atlases from the pack, 20-29 pictures a second, the frames right.
+- **Delivered**: `out/dist/dev_20261020_renut_deko3d/` — `peggle2.nro` (52,166,218 bytes, SHA-256
+  `58994fd6...7ab01de8`; Ryujinx with it: intro to a played level with 22 HD atlases, up to 30 pictures a second), `peggle2_renut_deko3d.toml` (copy it to the SD as `peggle2.toml`), `deko3d_shaders.bin` (the
+  9 variants: beside the NRO, skips the first compiles), `README.txt`. ELF
+  `out/nx/elf/peggle2_renut_deko3d_nolto_20261020.elf`; `check_switch_build.py` all checks passed on it. The test
+  runs' logs and shots: `out/renut_tests/{pc,emu}` (raw shots are about 3.6 MB each at 720p: moved off C:, which had
+  filled up; delete them when no longer wanted).
+- **Test configs wrote no log since 1.0.0** (found here): the NRO's built-in settings have `log_to_file = false` and
+  the configs of `tools/make_enhancement_configs.py` set only `log_level = "info"`, so a "logs on" config made no
+  `logs/` folder (seen in an emulator run). Their log section now has `log_to_file = true` too (one line added to 23
+  configs; the built-in settings and the player's `peggle2.toml` are unchanged).
+- **A slow stretch in one emulator run was the machine, not the build**: one Ryujinx run of the delivered config fell
+  from 24-29 to 1-4 pictures a second after 180 s of play (ordinary gameplay frames, no memory growth). The same
+  route then held 18-29 with the console stack sampler off and 16-29 with it on (the delivered config as is), each
+  for 7 minutes; other ports' emulator instances share this PC (one was running at the end of the last run).
+- **Taken from banjo-nx at the end (2026-10-20)**: `banjo_renut_device_swizzle` in its final form — a texture
+  whose header describes the same data as the device's fetch constant but differs in dword 0, 3 or 5 (which SetTexture
+  copies unchanged) is a stale header: the device's copy (what the GPU reads) is used (banjo-nx's whole-frame yellow
+  flash: a stack-temporary header rewritten with another swizzle). Peggle's routes logged no `[flash]` line, so the
+  picture is unchanged here.
+- **HD atlases read on a worker thread** (`peggle2_renut_hd_async`, on): a level start binds a dozen atlases, and
+  reading them (LZ4 into up to 36 MB of BC3 each) on the render thread stalled its first frames; now the "HD atlas
+  reader" (priority 0x3B, core 2 like Renut's other background threads) reads them and the game's 720 art shows for
+  the few frames until each is ready (at most 256 MB of read images wait). false = read at once, as the native
+  renderer does. (A first attempt detached the thread: `std::thread::detach()` throws on the Switch's pthreads and
+  the NRO aborted in Ryujinx; the thread is now simply never destroyed.)
+- **Docked soak with HD atlases** (Ryujinx, 1080p, ~4 minutes of play): the upload rings peaked at 128 MB during atlas
+  loads and went back to 64 MB; the host heap leveled at ~1.93 GB (1.47 GB without HD), textures 375 MB. It ended when
+  the PC's C: drive filled up (Ryujinx could not write a shot), not in the game.
+- **A texture memory cap for deko3d** (`peggle2_renut_texture_cap_mb`, 512): a 10-minute docked HD soak in Ryujinx
+  went from 68 to 601 MB of host textures (11 -> 35), and none was ever released: Peggle 2 keeps earlier levels'
+  atlases alive, and Renut's cold-texture policy (banjo-nx's `banjo_renut_memory_policy`) compares against the GPU
+  memory budget, which deko3d reports as 0 (the Switch's memory is the process's), so it returned before releasing
+  anything. Without a budget it now compares the host textures' own total with the cap and releases the ones not
+  bound for 120 frames (made again from guest memory, or the pack, if bound again). Soak with a 384 MB cap: the total
+  held at ~345 MB (12, then 5 cold textures released), 22-30 pictures a second for the 10 minutes.
+- **Docking and undocking while playing** (PC test switches `peggle2_render_test_toggle_at` / `_every`, which only
+  the native ring's Swap called; Renut's Swap now calls `peggle2::render::OnPresented` too, a no-op on the Switch):
+  13 changes in 200 s (720 <-> 1080 every 450 swaps, menus and a played level), each at the next frame, every frame
+  right (`out/renut_tests/pc/toggle1/sheet.png`). On the Switch the applet's mode message goes through the window's
+  `HandleDisplayModeChange` to `OnWindowPixelSizeChanged`, Renut's `RequestResize`, and plume's deko3d `resize()`,
+  which sizes the swapchain by `peggle2::render::Docked()`.
+- **banjo-nx's shader and render-thread work of 2026-10-19/20, taken at 05:50-06:50** (a read-only survey of both
+  trees first: `out/renut_port/banjo_optimisations_survey.md`; backups and patches in
+  `out/renut_port/backup_20261020_shaderopt/`). Everything banjo-nx documents as a render-thread / plume CPU
+  optimisation (memos, pushed constants, ring cleaner, kick submits, barrier merge / lean, depth hand-over, resolve
+  skip, proposals 1-13, 16, 18, 20-23) was already here with the same defaults. Taken now:
+
+  | What | Where | Effect on Peggle 2 |
+  |---|---|---|
+  | `tools/deko3d_glsl_opt.py` and `deko3d_variant_cache.py` as banjo-nx's (27 passes; 9 new: deadcomp, guardsel, lightbranch, nullps, txq, earlyz, gpr32, bonesel, aw4) | tools | deadcomp: 1 change (ps_23FB, an undefined `_67.w` -> 0.0); earlyz: all 4 pixel shaders; the others find nothing in Peggle's 6 shaders |
+  | early depth test (constant 909, `banjo_deko3d_early_z`, on) | `render/pipeline.cpp` | every Peggle draw gets 909 = 1, but its RB_DEPTHCONTROL is 0x00700730 (depth test off): no GPU change here; free |
+  | texture sizes from a buffer (constant 908, `banjo_deko3d_txq_constants`, on) | plume deko3d, `render/pipeline.cpp` | no `textureSize` in Peggle's shaders; there for safety of the generator |
+  | uam: banjo flag 1024 (128-bit row loads), per-compile GPR cap, cache tag bnx4; banjo-nx's split-load fix (06:07: a split global load lost its address) | `app/thirdparty/uam` | none on Peggle's shaders; the DKSH cache was rebuilt (9 variants, 7,556 bytes) |
+  | constants 910-912 and in-run A/B targets 15 / 16 (off) | `render/pipeline.cpp`, `render/draw.cpp` | N&B's lists: inert here |
+  | no re-present while the game stalls (`banjo_renut_stall_present`, false = new) + `[flash]` warning for a texture sampled with nothing written | `backend/present.cpp`, `render/textures.cpp` | no stale (uncleared deko3d) image shown during loads; no 16 ms re-presents |
+  | latency trim (`banjo_deko3d_latency_trim`, OFF as in banjo-nx until a console measures it) | `backend/video.cpp` | Ryujinx with it on: no hang, 0-1 of ~150 frames held (render-thread-bound there) |
+
+  Not taken: store cards (they need the guest window's first MB, which Peggle uses; the back-off covers the hot
+  spot), fur-shell skipping (N&B, not exact), the exact gamma lookup (Peggle keeps its power fit), the report counters
+  for header / device differences and the aw4 alignment check (diagnostics for passes that do nothing here).
+- **The late controller read was never on** (found here): the SDK had `rex::latency::BeforeInputRead` /
+  `NoteInputRead` but `InputSystem::GetState` did not call them, so `banjo_late_input` (on) delayed nothing and the
+  `[latency]` line said "no frame presented". Both calls added (`sdk/src/input/input_system.cpp`, as banjo-nx's). PC:
+  input -> present 10.5-15 ms at 30 fps, late input 0 ms (the frame cap is the limit there); Ryujinx: input ->
+  present 19-24 ms, input -> GPU done 52-61 ms, late input 0 ms (the game thread is the limit there). On Windows an
+  SDK change alone does not reach `out/pc`: `rexruntimerd.dll` is copied there only when the exe relinks.
+- **The DKSH cache lost its last records at every close** (found here, shared code): the append `fflush`ed but did not
+  `fsync`; Ryujinx kept the record in its host file buffer and a killed process dropped it, so every start compiled
+  the same variant again ("8 hits, 1 added", the file's mtime unchanged). `fsync` after the record (libnx:
+  `fsFileFlush`): the next run 9 hits, 0 compiles. A console closed with HOME is killed the same way. Told banjo-nx.
+- **Barriers on deko3d are not a problem** (checked with `peggle2_renut_diag_transitions`, a diagnostic key, off): a
+  level frame has two passes (the board at 896x736, resolved, then the screen, resolved to the front buffer) and 8
+  layout changes, which plume's barrier merge turns into ~6.5 fragment barriers a frame. (The `[renut] deko3d:` line's
+  draw, barrier and upload counts are totals since the start, not per 10 s.)
+- **The pipeline list lost records the same way** (banjo-nx's finding after the DKSH report, taken at 07:35): its
+  `std::ofstream` flushed but never synced. banjo-nx's `render/pipeline.cpp` now writes with `FILE*`, syncs (`fsync`;
+  `_commit` on Windows) at most once a second, and `SyncPipelineListLocked()` (called after the present in the Swap's
+  render-thread work, under the state mutex) syncs a burst's last records a second later; records written by older
+  configurations are normalised to the current keys when loaded (no pipelines built ahead for no draw), and every
+  run-time compile logs "uam: run-time variant (... ): defines". Ryujinx: the SD's `pipeline_list.bin` went from
+  8,521 bytes (01:15, unchanged through every later run) to 9,466 (07:41); DKSH 9 hits, 0 compiles, 0 run-time
+  variants.
+- **Extreme Fever, the VICTORY screen and the level change, through Renut** (PC, Windy's first level won with the
+  test switch `peggle2_dlc_test=firstorange`, the PS4 content's data root `out/ps4_dlc/game_root_mod_mp`, Windy's
+  route of the DLC tests): the zoom-in, "EXTREME FEVER", the fever buckets, fireworks, "EXTRA BALL POINTS", "TOTAL
+  POINTS", the white flash, VICTORY with its rainbow and objectives, the iris to the next level and its fly-in. The
+  same game frames recorded with both renderers (`peggle2_video_from_frame = 4420`, 180 frames; hashes in
+  `out/pc/captures/video_f4420_{renut,native}.hash`, sheets in `out/renut_tests/pc/windy_f4420b_*`) show the same
+  sequence; a dark board seen in a 4 s sample was the iris's first frames, which the native sample had passed by
+  a few frames. (`boot_test.ps1` clears `REX_PEGGLE2_VIDEO_FROM_FRAME` unless given `-VideoFromFrame`.)
+- **From futari-nx (2026-10-20), not acted on yet**: Renut's own keys read their own cvars, so the CPU / non-CPU
+  masters set to false leave most of them on (futari gave 52 of them rows in its enhancement table); Renut's kick
+  submits and so the latency trim only act on a list of 200 draws (`kKickSubmitDraws`), and Peggle draws 20-35 a
+  frame, so both do nothing here (as the emulator run showed: 0-1 frames held); futari's guest vblank thread now
+  has banjo-nx's display-thread placement (priority 0x2C, core 2) — Peggle's vblanks come from the SDK's "GPU VSync"
+  host thread, unchanged and the same as the native renderer's on the console.
+- **Delivered at 07:43**: `out/dist/dev_20261020_renut_deko3d/peggle2.nro` (52,207,178 bytes, SHA-256
+  `3dde60ab...fe28072`; `check_switch_build.py` all checks passed; ELF
+  `out/nx/elf/peggle2_renut_deko3d_nolto_20261020_0743.elf`; the 06:52 build without the pipeline-list fix was
+  `fbcb47bf...fd9750`) and its `deko3d_shaders.bin` (bnx4, 9 variants, `f750bc80...bd84ca`); Ryujinx with it:
+  menus, Select a Master, play, power wheels, "LAST BALL!", 27-30 pictures a second when the machine was quiet.
+- **The native renderer after this round**: verify mode 110.0 M checks, 0 differences (06:55). Lockstep against
+  the 2026-10-13 baselines (`ls_fresh_off1/2`) fell to 46 of 123 with 0 at the same game frame — but a CPU-OFF run
+  made now (`ls_off_0800`) scores exactly the same against them, so it is not the CPU work, and an A/B of the new
+  input-probe calls (a temporary switch, removed) changed nothing either. The old baselines stopped reproducing on
+  this PC between 04:56 (95 of 123, partly 2 frames off) and 06:58, both modes alike; the only event found in
+  between is an NVIDIA driver reset at 04:45 (the game renders on the AMD iGPU, the same device in every log), so the
+  cause is not known. What is new: the game is now frame-deterministic in the lockstep setup — two fresh CPU-off runs
+  (`ls_off_0800`, `ls_off_0830`) agree on all 398 frames. Against them the CPU-on runs: **398 of 398 at the same game
+  frame** (`ls_renut_opt_quiet`, 07:47) and 387 of 398 (`ls_on_0835`: the last 11 frames, 1388-1399, the loading
+  spinner at the window's end). Use `-Base1 ls_off_0800 -Base2 ls_off_0830` from now on.
+- **Renut's keys under the masters** (futari-nx's finding, its classification; 08:24): Renut's optimisations read
+  their own keys, so `peggle2_cpu_enhancements = false` / `peggle2_noncpu_enhancements = false` left them on. 52 rows
+  in `kEnhancements` now (`renut_*`: 16 CPU, among them Peggle's texture back-off and HD reader; 36 non-CPU, among them
+  the texture cap and the late input), each with its code default as the on value, so nothing changes by default;
+  `tools/make_enhancement_configs.py` regenerated the built-in defaults and the configs (only the new rows changed;
+  the previous files in `out/renut_port/configs_before_masters/`). Not rows: Renut's fixes and settings, banjo-nx's
+  N&B lists, the latency trim. PC with both masters off: every `renut_*` row off ("group master off" in the
+  `[enhancements]` line), the frames right, render thread 6.0-6.7 ms a frame against 0.5-0.9 with them on — what the
+  whole stack saves on the PC. Ryujinx with the defaults: 26-30 pictures a second, DKSH 9 hits. Delivered:
+  `peggle2.nro` 52,223,562 bytes, SHA-256 `fb651f82...7110a0`, ELF `..._20261020_0824.elf`, and the regenerated
+  `peggle2_renut_deko3d.toml`.
+- **Renut and the web installer** (the user's question, 2026-10-20; the survey is
+  `out/renut_port/web_installer_deko3d.md`): the dev NRO embeds game-derived shader data — `deko3d_glsl.bin` (the six
+  translated shaders as GLSL text; for Peggle its zstd dictionary is that text) and `shader_cache_switch.cpp` (their
+  metadata) — so it is a personal test build, not for distribution (its README says so); `deko3d_shaders.bin` is
+  compiled from them, so it is game-derived too. Only three of the six shaders are stored in `default.xex`
+  (0x820528D0, 0x82052AD8, 0x82052C38); the Bink movie trio (vs_3cae, ps_23fb, ps_b79e) is compiled at boot by
+  D3DXCompileShader, so no installer can make those from the game's files: the port has to write them (as for the
+  native library). Options: (0) write all six as port shaders (`tools/deko3d_host_shader.py`; the other three are
+  SexyAppFramework sprite shaders): nothing game-derived, the DKSH cache can ship; (1) the installer makes the three
+  stored ones (Renut's XenosRecomp front end and DXC with Renut's arguments in WebAssembly, SPIRV-Cross in
+  WebAssembly, the GLSL passes in JavaScript or Pyodide; only 8 of the 27 passes change Peggle's shaders) and writes
+  `deko3d_glsl.bin` beside the NRO, which then reads it from the SD; the console compiles the 9 variants at its first
+  boot (~0.4 s each by banjo-nx's console measurement) and keeps them; (2) as (1) plus uam in WebAssembly for the DKSH
+  (feasible, ~4 s saved once: not worth it). Either way a release build option must leave the embedded files out.
+  Corrections from the survey: three of the six shaders are in the XEX (above said six); 0.6 s per variant was the
+  emulator's figure, the console's is ~0.4 s.
+- **Port-written Bink movie shaders for Renut** (2026-10-20, 08:40): `shaders/port/renut/peggle2_renut_movie_{vs,ps}.hlsl`
+  (no game code; the native renderer's port movie shaders' math, in Renut's interface) and `tools/renut_port_shaders.py`,
+  which puts the translator's `shader_common.h` and its prologue (rebuilt from ShaderRecompiler's pattern: checked equal
+  to the translator's own text) in front and writes `vs_3caebedd6edf56e6.hlsl`, `ps_23fb686cb21303f8.hlsl`,
+  `ps_b79e9877de15d6db.hlsl` into the translator's override folder after the early alpha pass (`gpu.cmake`, option
+  `PEGGLE2_RENUT_PORT_SHADERS`, on). Checks: the GLSL after SPIRV-Cross, conversion and every pass is the translation's
+  but for the names of temporaries, the order of commutative multiplies and adds (exact), `vec4(0.0).z` written `0.0`, and
+  the alpha variant's texture bindings numbered in fetch order (its `texb=` table maps each to the same game texture);
+  every pass fires on them as on the translations; the three untranslated shaders byte for byte the same. PC intro videos
+  (frames 60-659): a port-shader run shares 336 images with a translation run, and two port-shader runs 328 with each other
+  (the videos follow host time): no difference the shaders add. Ryujinx: the EA and PopCap videos play.
+- **Release shader layout: no translated game shader in the NRO** (09:11): `tools/renut_release_shaders.py` writes
+  `out/renut_switch_release/`: the built-in package with the three port shaders only, `shader_cache_switch.cpp` without
+  the SPIR-V (the deko3d back end never reads it; numbers only remain: hashes, fetch masks, vertex input formats, no
+  literals in Peggle's), and `sd/deko3d_glsl.bin` with the three stored shaders (a test copy: game data). cmake
+  `PEGGLE2_RENUT_RELEASE_SHADERS=ON` builds against it (`app/cmake/peggle2_renut_gpu.cmake`; `build_switch.ps1 -Define`
+  cannot pass paths with spaces). `banjo_renut_deko3d.cpp` now reads `deko3d_glsl.bin` beside the NRO first, then the
+  built-in package, and takes a package without a dictionary. Checked: none of the stored shaders' distinctive GLSL
+  lines are in the 09:11 NRO (all of them were in the 08:24 ELF); Ryujinx with `deko3d_glsl.bin` beside it: menus,
+  Select a Master, play, the movies (port shaders); a clean DKSH cache of 9 variants compiled once and kept.
+  Without `deko3d_glsl.bin` beside such an NRO (09:52 build): Renut's choice (`banjo_renut_select.cpp`) counts the
+  shader table's shaders that have no GLSL in any package (`deko3d::MissingGameShaders`), logs "3 of the game's
+  shaders are in no GLSL package ... The native renderer runs instead" and sets `masseffect_renderer_native = true`;
+  Ryujinx: the native renderer ran with the release library (`peggle2_shaders.mesp`, 8 shaders), 918 draws in the
+  window, none without its shaders (the Switch shots are Renut's, so they stay black there).
+  Limitation: without the SPIR-V, `renut_gpu_backend = "vulkan"` (NVK) on the Switch has no game shaders in such a
+  build (deko3d is the default and the back end tested); the installer would have to make SPIR-V too for that.
+- **The web installer makes `deko3d_glsl.bin`** (the user's choice, option 2; peggle2-nx-installer):
+  `wasm/renut_hlsl.*` (`tools/renut_hlsl_frontend.cpp` + Renut's ShaderRecompiler, `tools/renut_hlsl_pch.h`; its HLSL
+  for the three stored containers is the native translator's byte for byte), the page's existing `wasm/dxc_web` (DXC
+  v2025.1, the native renderer's fixed arguments: shader model 6.6, Vulkan 1.2; Renut's `-DBANJO_DEKO3D -DRENUT_RECOMP`
+  as `#define` lines in front, and the y flip it forces on vertex shaders taken out of the GLSL, one fixed pattern),
+  `wasm/spirv_cross.*` (SPIRV-Cross 22b22f56, the native tool's source; `wasm/src/deko3d/build_wasm_deko3d.sh`), the
+  GLSL conversion and passes in JavaScript (`lib/deko3d_glsl.js`), and `lib/deko3d_package.js` (the package with zstd
+  frames of raw blocks: the zstd tool decodes them; no dictionary). Result for the three: after conversion and the
+  passes the GLSL is the native chain's byte for byte (so the console's DKSH keys are the same), and Ryujinx with the
+  page's package compiled nothing and drew every screen. The JavaScript conversion and passes against the Python
+  tools: byte for byte on Peggle's 6 and on banjo-nx's 4,881 shaders, also with banjo-nx's shader lists (so all 27
+  passes changed something and were compared), and on 41 made-up edge cases (CRLF, BOM, Unicode, convert's errors: the
+  same text or the same failure) (`test/deko3d_glsl_node.mjs`; banjo-nx's shaders read in place, nothing copied).
+  Known differences, in no corpus: Unicode 17 vs Python's 16 word characters, the order of an error naming one of
+  several misused sampler tables. About 20 ms a shader; Peggle's 6 in 0.04 s. The page's code from the Xbox 360 package (Node, `test/deko3d_node.mjs`, 1.0 s) and in
+  Chromium (1.7 s): `deko3d_glsl.bin` 13,752 bytes, SHA-256 `79c467dd...4e06`, the one Ryujinx ran; the installer's
+  `createPackage` (update zip, `test/package_node.mjs --deko3d <entry>`) writes it, zip CRCs good. The release
+  manifest gets the entry with `test/release_node.mjs ... --deko3d <tested deko3d_glsl.bin>` when an NRO with Renut is
+  published (the 1.0.0 NRO has no Renut: no entry now). Values for this build: containers
+  `b546220e...b761`, `5222bd1e...550d`, `f7123e3e...9461`, package `79c467dd...4e06`. `lib/installer.js` `makeDeko3dPackage` (after the shader library; checks the
+  three containers and the result against the build's manifest entry `"deko3d": { containers_sha256, package_sha256 }`;
+  none = skipped), `deko3d_glsl.bin` in both zips, the worker loads the two modules only for such a build, the service
+  worker caches them, `renut_shader_common.h` beside `shader_common.h`. Node: `test/deko3d_hlsl_node.mjs`,
+  `test/deko3d_chain_node.mjs`, `test/deko3d_node.mjs` (prints the manifest entry).
+- **The delivered files in Ryujinx** (the 09:11 NRO, its `deko3d_glsl.bin` and `deko3d_shaders.bin`, the delivered
+  config, handheld, HD atlases from the pack): DKSH 9 hits, 0 compiles; 16 atlases from the pack; frames right. One run
+  fell to 0.2 pictures a second after 3 minutes while a 14-process corpus test and another port's emulator ran; the
+  rerun (one other emulator) held 14-28 with one stretch of 8-12 in which the renderer itself did nothing unusual (no
+  atlas read, no compile, render thread 5-6 ms a frame). Docked soak of the same files (9.5 minutes, 1080p, HD):
+  12-23 pictures a second while two other emulators ran, then 26-30; 28 atlases from the pack; host heap 1.87 GB
+  (as the 07:43 build's soak); frames right (`out/renut_tests/emu/final_docked_soak/sheet.png`). The installer's full
+  (not update) package was not run with the deko3d step (no PS4 package found on this PC); its zip entry is the same
+  code in both modes.
+- **60 pictures a second on deko3d** (Ryujinx, the delivered files, `peggle2_fps = 60`): 43-55 pictures and 50-60 logic
+  updates a second through menus and a level (speed right). A first run stopped for 52 s after a level load: every
+  thread of the process was silent then (the 10 s report threads too), so the emulator process itself stalled; the
+  rerun had no stop.
+- **banjo-nx after 07:35, not taken**: its `skinonce` pass and the uam 128-bit stores to storage buffer 13 (N&B's fur
+  skin cache, an A/B; Peggle has no skinned shaders, and the installer's JavaScript passes would need it ported), and
+  the run-time variant log's shader fingerprint (its own cache tooling).
+- **banjo-nx's console display note (2026-10-20, after 11:23)**: on the console a second `viOpenDefaultDisplay` fails
+  while libnx's default window holds the display (Ryujinx accepts it). Peggle opens it only in `display_sync.cpp`'s
+  thread, which starts only with `banjo_display_sync = true` (at 11:23 off by default and in every Peggle config; on since 13:32 with banjo-nx's fix taken, see "banjo-nx's input-latency set"; on a failure
+  it logs and the limiter keeps its timer); Renut's swap pacing (`PaceRenutSwap`) is a timer. So no change here; if the
+  key is ever turned on, take banjo-nx's fix (its own `__nx_win_init` / `__nx_win_exit` / `nwindowGetDefault` and that
+  display; its docs/deko3d-port-faq.md). The shared Ryujinx now signals the vsync event on a 60 Hz grid (from 11:23):
+  nothing in Peggle's default setup waits on it.
+- **Releasing an NRO with Renut through the web installer: the steps** (none done yet: publishing is the user's call)
+  1. PC build (the translator, the port shaders, `out/pc/renut_gpu/shader_cache.cpp`); the deko3d SPIR-V with
+     `BANJO_HLSL_OVERRIDE=out/pc/renut_gpu/early_alpha_hlsl BANJO_DEKO3D_SPIRV_DIR=out/deko3d_shaders/spirv` on
+     `XenosRecomp.exe out/renut_shader_dump <cpp> shader_common.h`; `tools/deko3d_shaders.py`, `tools/deko3d_glsl_opt.py
+     --check`, `tools/deko3d_shader_package.py`, `tools/renut_switch_shader_cache.py`, `tools/renut_release_shaders.py`.
+  2. Switch release build with `-Define "PEGGLE2_RENUT_RELEASE_SHADERS=ON"` (and the release's LTO / PGO settings);
+     `check_switch_build.py`; check that no stored shader's GLSL is in the NRO (the 09:11 check: distinctive lines).
+     Delivered now: `out/dist/dev_20261020_renut_deko3d/peggle2.nro` of 14:36 without the Vulkan driver, with the
+     latency set, sa2-nx's CPU work and futari-nx's deferred chain with its device guard, the local multiplayer fix, without late input's GPU-queue
+     part (SHA-256 `776e8e9c...389ab716`, 37,887,562 bytes; 20:06), ELF
+     `out/nx/elf/peggle2_renut_novulkan_mpfix_nolto_20261020_2011.elf`; the
+     09:52 one with the driver: ELF `out/nx/elf/peggle2_renut_deko3d_split_nolto_20261020_0952.elf`.
+  3. Test on the console with the page's `deko3d_glsl.bin` (`test/deko3d_node.mjs --out`) beside the NRO.
+  4. Installer: the NRO as the release asset; `node test/release_node.mjs <x360> <ps4> <peggle2.nro>
+     <peggle2_shaders.mesp> <recipe> --version <v> --deko3d <tested deko3d_glsl.bin> --write` (it makes the page's
+     package again and refuses a different one); `test/package_node.mjs` end to end. An NRO without the Vulkan
+     driver never reads `peggle2_shaders.mesp`; the page still writes it (harmless; leaving it out of such a release
+     would be an installer change, not made).
+- **Docked HD run of the 08:24 build** (Ryujinx, `peggle2_hd_pack` at the emulator SD's `hdpack/`): the pack's 362
+  atlases found, 1536x3072 and 6144x6144 atlases read in 39-84 ms on the reader thread, render 1920x1080, 24-28
+  pictures a second, the frames right (`out/renut_tests/emu/hd_docked_0830/sheet.png`).
+- **Docked soak of the 07:43 build** (Ryujinx, the delivered config, the profile's `docked_mode` on for the run and
+  put back; 9 minutes of the soak route): swapchain 3 x 1920x1080, render 1920x1080, 23-29 pictures a second after
+  loading, render thread 1.1-3.3 ms a frame, DKSH 9 hits / 0 compiles, no `[flash]` line; the frames right
+  (`out/renut_tests/emu/soak_docked_0850/sheet.png`). The HD pack was not found at the delivered config's path in this
+  emulator SD (it sits under `hdpack/` there), so this soak drew the game's own atlases.
+- **No Vulkan driver in the Switch build** (11:51, the user's call: "remove the vulkan driver from the switch builds
+  just stop it linking"). `sdk/cmake/rexglue_switch.cmake` has `REXGLUE_SWITCH_LINK_NVK` (default ON: other titles
+  unchanged); `app/CMakeLists.txt` sets it OFF for Peggle 2. OFF: no NVK SDK needed, `rex::nvk` is only zstd z nx
+  stdc++ m, plume's `PLUME_SWITCH_LINK_NVK` (set from it in `app/cmake/peggle2_renut_gpu.cmake`) leaves Mesa's link
+  group out, and `sdk/src/ui/switch_no_vulkan.c` joins `rexglue_switch_startup`. The SDK's and plume's Vulkan code
+  reach the driver through function pointers, so only five symbols were left undefined: `vkGetInstanceProcAddr`,
+  `vkDestroyInstance`, `vk_icdGetInstanceProcAddr`, `vk_icdNegotiateLoaderICDInterfaceVersion` (stubbed: no Vulkan,
+  `VK_ERROR_INCOMPATIBLE_DRIVER`) and `posix_memalign` (FFmpeg's allocator; newlib has none and Mesa used to supply
+  it: on `memalign` now). plume's Switch `VulkanInterface` would then call `vkEnumerateInstanceExtensionProperties`
+  through a null pointer if anything made one: banjo-nx's guard (it did the same build today and found this) returns
+  with no instance when volk found no `vkCreateInstance` / `vkEnumerateInstanceExtensionProperties`, so
+  `CreateVulkanInterface` gives nullptr (`plume_vulkan.cpp`; NRO of 12:05). The native renderer is Vulkan, so
+  `banjo_renut_gpu` gets `PEGGLE2_NO_VULKAN`: Renut's
+  renderer is chosen whatever `peggle2_renderer` / `masseffect_renderer_native` say (logged once), the back end is
+  deko3d whatever `renut_gpu_backend` says (`backend.cpp` `ResolveBackend`), and a missing `deko3d_glsl.bin` is an
+  error line instead of the switch to the native renderer. `tools/check_switch_build.py` reads the option from the
+  build's CMakeCache and then checks that no Mesa is in the NRO ("Vulkan driver: none"). NRO 52,211,274 ->
+  37,781,066 bytes; the link no longer waits on Mesa. Ryujinx (handheld, an old config: `peggle2_renderer = "native"`,
+  `masseffect_renderer_native = true`): Renut on deko3d, DKSH 9 hits, 18-27 pictures a second through menus and play,
+  frames right (`out/renut_tests/emu/novk_1155`); the 12:05 NRO with `renut_gpu_backend = "vulkan"` too: deko3d, menus,
+  Select a Master and play drawn, 22-29 pictures a second (`novk_guard_1207/sheet.png`, shot hashes beside it); docked
+  with the delivered config and the HD pack (`novk_docked_1212`): swapchain 3 x 1920x1080, 3 HD atlases from the pack,
+  DKSH 9 hits / 0 compiles, 22 pictures a second in play, the frames right (its first 30 s were a slow boot with
+  another port's emulator running). Without `deko3d_glsl.bin` (`novk_noglsl_1200`): the boot error line,
+  16 capped "not in the GLSL package" lines, 0 draws, the game running at 26 pictures a second on a black screen; no
+  crash, the DKSH cache and pipeline list untouched. Still linked and dead (the code's own size in the ELF): the
+  recompiled game 33 MB, Renut + plume 2.05 MB, the SDK's Xenos graphics 1.99 MB, the native renderer 1.51 MB, other
+  Vulkan code 0.33 MB; dropping the native renderer too is `PEGGLE2_NATIVE_RENDERER=OFF` and a full rebuild (not done).
+- **banjo-nx's input-latency set, on by default** (13:32; asked through banjo-nx's session for the user):
+  `backend/render_thread.cpp`, `render_thread.h`, `backend/video.cpp` and `display_sync.cpp` are banjo-nx's of
+  2026-10-20 (Peggle's copies plus only its additions: patches and the old files in `out/to_delete/latency_before`);
+  `video.h` `kKickLists` 6; `banjo_renut_tuning` gets `banjo_late_input_gpu`, `banjo_late_input_gpu_margin_us` (6000)
+  and `banjo_deko3d_eager_kicks` with the in-run A/B targets 18 / 19 (17, banjo-nx's skin once, is not here).
+  Enhancement rows (non-CPU, on): `renut_late_input_gpu`, `renut_eager_kicks`, `renut_display_sync`
+  (`banjo_display_sync`; phase auto and its 12 ms cap were already the defaults). `banjo_deko3d_latency_trim` stays off
+  (it starved the GPU on banjo-nx's console with eager kicks). Display sync: banjo-nx calls it from its own frame
+  limiter, which Peggle 2 does not have, so `PaceRenutSwap` (`peggle2_frame_hooks.cpp`) now asks
+  `display_sync::NextRelease` first and keeps its timer when the refresh is not known; `display_sync.cpp` also brings
+  banjo-nx's own `__nx_win_init` / `__nx_win_exit` / `nwindowGetDefault` (the console refuses a second display open
+  while libnx's default window holds it). Ryujinx (`latency_1334`, the delivered config, the shared build with the
+  60 Hz vsync grid): "[display] the frame limiter follows the display's refresh", refresh 16.68 ms; steady play 30.0
+  pictures a second, 300 of 600 refreshes with a new image, 0 never shown, input -> display 16.8 ms; frames right.
+  Late input added nothing there (the emulator's game thread is the limit: no slack). Peggle draws 20-35 times a
+  frame, so eager kicks rarely fill a list.
+- **sa2-nx's Renut CPU work, on by default** (14:06; the user: "wire up all of SA2's new CPU improvements"; its
+  write-up `D:\sonic adventure 2\sa2-nx\docs\renut-cpu-work-for-banjo.md`). How: a 3-way merge per file (`git
+  merge-file`) with banjo-nx's `c319b29` as the base (read with `git show`, nothing written there), Peggle's file as
+  ours and sa2-nx's as theirs (`out/sa2_merge`: base / ours / theirs / merged and the scripts; the files before in
+  `out/to_delete/sa2_cpu_before`). Taken whole: `backend/queued.cpp/.h`, `backend/render_thread.cpp/.h`,
+  `render/draw.cpp/.h`, `render/pipeline.cpp/.h`, `render/surfaces.cpp/.h`, `render/vertex_format.cpp/.h`,
+  `guest/callbacks.cpp/.h`, `guest/command_buffers.cpp` and the new `gpu/sa2_line_compare.h` (one conflict: the
+  memexport store cards, Peggle's guarded line kept). Left out as sa2-nx's own: its controller read hook (Peggle's
+  SDK calls the late input itself), its guest vertex declarations, a depth-size diagnostic, its gamma ramp, double
+  buffer, pacing and game hooks. By hand: `d3d/hooks/device.cpp` (`SnapshotDeltasNewFrame` at the Swap; the core
+  layout, key `sa2_renut_core_layout`), the 10 s "[renut] device snapshots" line from `banjo_renut_tuning.cpp`, and
+  the SDK's `RexSetGuestThreadCoreLayout` (`system/xthread.cpp`: every XThread registers itself with the pthread
+  layer; threads made later take the layout) with `RexSwitchSetCurrentThreadMask` / `RexSwitchSetThreadMaskOf`
+  (`core/threading_switch.cpp/.h`). 19 rows (CPU group) keep sa2-nx's key names: `sa2_renut_snapshot_deltas`,
+  `_constants`, `_narrow`, `neon_compare`, `capture_batches`, `callbacks_fast`, `wake_batch` (16 / 1),
+  `prefetch_next`, `done_notify_waiters`, `batch_clock`, `chain_reuse`, `inline_line_compare`, `stream_mask`,
+  `texture_defaults_copy`, `fetch_slots_skip`, `fetch_data_unread`, `shared_partial_clear`, `lean_diagnostics`,
+  `core_layout`; the two `_verify` keys stay off (test configs only). Peggle's device layout is sa2-nx's (the same
+  private offsets, snapshot 13,088 bytes), so its chain layout and narrow ranges apply unchanged.
+  What it does for Peggle: its draws are one plain draw a frame plus `Begin*Vertices` sprite draws, which sa2-nx keeps
+  as whole copies outside the delta chain (they are queued later than made), so the deltas and the chain's reuse did
+  not fire here until futari-nx's deferred chain (next entry) ("[renut] device snapshots": every draw a whole copy; PC verify run: 0 of ~300 draws per 10 s
+  differ). The rest applies to every draw or hook: the hooks' lock-free first calls, the render thread woken per 16
+  draws, the done signal only with a waiter, the prefetch, one clock read a batch, the shared constants' NEON and
+  skipped compares, the stream mask, the lean diagnostics, the core layout. Checks: PC build and runs; Renut on the
+  PC is not frame-deterministic (two runs with the keys off share 47 of 396 frames), and the keys-on run has all 47
+  of them (36 at the same frame); Switch `check_switch_build.py` all passed; Ryujinx (`sa2cpu_1407`, the delivered
+  config, HD pack): "sa2_renut_core_layout: ... 17 threads set", menus, play and the power wheel right, 26-28
+  pictures a second in play, render thread 1.1-2.6 ms a frame, no audio warnings. sa2-nx's store-card items (17, 18)
+  do not apply: Peggle has no store cards.
+- **Release 1.0.1** (2026-10-20/21; the user: "give me a build to instrument pgo with please turn off all logging
+  also please enable 60fps by default now for all builds including the final one as the new renderer improves
+  performance enough. make sure the generated .toml file only has the same options as 1.0.0 for the end user", then
+  "can you just use the pgo stream you got from ryujinx to build the final should be good enough", "please bump it to
+  1.0.1 you can just hex edit it over" and "upload to github please update the readme and update the webinstaller").
+  - **60 by default**: `peggle2_fps` defaults to 60 in the code (`peggle2_frame_hooks.cpp`), in every generated
+    config (`make_enhancement_configs.py`: the header's default and the play config) and in the release files;
+    `tools/win/verify_lockstep.ps1` sets `REX_PEGGLE2_FPS=30` (its baselines were recorded at 30).
+  - **Built-in settings** (`app/peggle2_switch_defaults.toml`, compiled into the NRO): Renut's renderer on deko3d
+    (`peggle2_renderer = "renut"`, `renut_gpu_backend = "deko3d"`, `masseffect_renderer_native = false`) and
+    `peggle2_fps = 60`; logging off as in 1.0.0 (`log_level = "off"`, `log_to_file = false`, no profiler report).
+    `deko3d.log` (`banjo_renut_deko3d.cpp`) is now written only with `log_to_file` (a Ryujinx run of the instrumented
+    build had written it with logging off). The player's file the game writes (`app/peggle2_switch.toml`) has 1.0.0's
+    four keys exactly (`git show HEAD:app/peggle2_switch.toml`: only the fps value and its comment differ).
+  - **PGO**: instrumented build `build_switch.ps1 -BuildDir out/nx -Pgo generate -Define
+    "PEGGLE2_RENUT_RELEASE_SHADERS=ON;PEGGLE2_SWITCH_LTO=ON;REXGLUE_SWITCH_LINK_NVK=OFF"` (LTO, 52,366,922 bytes;
+    ELF `out/nx/elf/peggle2_pgo_generate_lto_20261020_2343.elf`; checks passed). Profile: its Ryujinx run with the
+    player's config and the HD pack (`out/renut_tests/emu/pgo_gen_2345`: boot, title, menus, a level, the power wheel;
+    the 2-minute dump, `out/pgo_streams/ryujinx_20261020/peggle2_pgo_1.stream`, 2,938,109 bytes), the user's choice
+    instead of a console session. Merged by `tools/win/pgo_merge.ps1` into 165 `.gcda` (123 recompiled game, 42 app;
+    Renut's objects get no PGO flags); 1.0.0's 164 kept in `out/pgo_gcda_1.0.0/`. Final: `-Pgo use` (LTO, 170 compile
+    rules with the profile; `banjo_renut_deko3d.cpp` changed after the session: `-Wno-coverage-mismatch` drops its
+    profile), 41,483,850 bytes, `check_switch_build.py` all passed; ELF
+    `out/nx/elf/peggle2_1.0.1_lto_pgouse_20261021_0003.elf`.
+  - **Version 1.0.1**: the NACP's display version patched in the NRO (one byte at 0x278EEAA, "1.0.0" -> "1.0.1"; the
+    three other "1.0.0" strings are toml++'s messages) and `PEGGLE2_VERSION` set to 1.0.1 in `app/CMakeLists.txt` for
+    later builds. NRO SHA-256 `577508993bd8d5753e23613ca0ceedfcf75c9b65eecdcb54192ebe37b50b79ed`
+    (`out/dist/final_lto_pgo_20261020/`). Ryujinx with the player's config (`final_101_0005`): title, menus, play and
+    the power wheels right; no file written but the shots (no log, no `deko3d.log`).
+  - **Installer**: `test/release_node.mjs --version 1.0.1 --deko3d` from the two original games (the Xbox 360 package
+    in `D:\peggle 2\58411436\000D0000`, the PS4 base package read in place) with 1.0.0's library, index and recipe:
+    the 1.0.1 entry with the `deko3d` block (the page remade `deko3d_glsl.bin` byte for byte, `79c467dd...`); the
+    deployment workflow now publishes `renut_shader_common.h`; README and NOTICES (Renut's translator, SPIRV-Cross)
+    updated.
+  - **Repository**: README (what's new, the renderer, 60 by default, the update note for 1.0.0's `peggle2_fps = 30`),
+    THIRD_PARTY_NOTICES (reNut, plume, uam, Renut's XenosRecomp, Dear ImGui, SPIRV-Cross, deko3d), the vendored
+    `app/thirdparty` committed as banjo-nx's repository has it (without Microsoft's prebuilt DXC binaries and
+    D3D12MA's sample executable).
+- **Local multiplayer: player 2's controller did nothing in a duel** (20:06; the user's console report: "both
+  controllers worked when selecting a character but as soon as the game begins in duel (taking turns) player 1 works
+  fine and player 2 the controller does nothing"). Reproduced on the PC (`tools/win/mod_test.ps1` on
+  `game_root_mod_mp`, player 2 as `REX_PEGGLE2_INPUT_SCRIPT_P2` in the environment: `-Keys` splits on commas, so a
+  script there keeps one event). The 2026-10-14 duel never tested player 2: its second script pressed only the join,
+  and the 15 s shot clock fired player 2's shots. New diagnostics, off by default: `input_diag_users` (SDK
+  `xam_input.cpp`: XamInputGetState's calls per user every 10 s, with how many had input; XamUserGetDeviceContext's
+  calls) and `peggle2_diag_controllers` (`peggle2_debug_hooks.cpp`, a hook on the input manager's update
+  `sub_8245F778`: each of its four controller objects' user index, the profile it is bound to at +448, flags).
+  Findings: the game polls all four users about 60 times a second, and player 2's presses reached user 1 during the
+  duel, yet player 2's turns waited out the shot clock; with only player 1 pressing, player 2's turns fired at once:
+  player 2 played on player 1's controller. Peggle 2 ties a controller to a game profile (the poll looks the profile
+  up by the user's name, XamUserGetName, through the manager at +1868, and stores it at +448), and a duel player takes
+  its turns on its profile's controller; the lobby reads the controllers directly, which is why it worked. Controller
+  1 never got a profile (+448 stayed 0): the sign-in handler (`sub_8237B948`) reads every signed-in user's profile
+  settings, and the SDK's `XamUserReadProfileSettingsEx` answered only user 0 (`X_ERROR_NO_SUCH_USER` for the guest
+  of the 2026-10-14 guest sign-in), so the game made no profile for player 2 and fell back to player 1's. Fix
+  (`sdk/src/kernel/xam/xam_user.cpp`): a guest reads the profile's settings, as a guest on the console gets settings.
+  After it: controller 1 bound to a profile of its own (`[controllers]`), the banner names player 2 "USER(1)" (before:
+  the profile's name for both), and each player's turns follow only their own controller (`out/ps4_dlc/shots/
+  mp_fix_p2_sheet.jpg`: player 2 pressing, its shot 1 s into its turn; `mp_fix_p1_sheet.jpg`: player 1 pressing,
+  player 2's turn waits out the shot clock, player 1's fires at once; before: `mp_p2test2/3`). Ruled out on the way:
+  XamUserGetDeviceContext (never called in a duel), and controllers 2-4 as separate profiles instead of guests (an
+  experiment: then no controller drove player 2 at all, the same missing profile). Not checked in Ryujinx: the
+  scripted pads land behind the emulator's own controllers (users 2-3) there. Console run pending. Relevant to any
+  title that takes more than one local player with the guest sign-in.
+- **`banjo_late_input_gpu` removed completely** (20:06; the user's follow-up through banjo-nx's session, banjo-nx's
+  package 36s did the same): the key and its margin key, `LateInputGpuOn` / `LateInputGpuMarginUs`, the GPU-slack and
+  applied-delay rings and `NoteGpuQueueWait` (`backend/render_thread.cpp/.h`), the first-work stamps, queue-wait
+  notes and `ReportQueueWaitLocked` at the kicks and presents (`backend/video.cpp`), the A/B target 19 (now reserved;
+  range 0-18) and the report's GPU-queue part. Plain late input (the render-thread slack) stays; the "input -> GPU
+  done" note at every kick stays (the probe's measurement, not this feature).
+- **`banjo_late_input_gpu` off again** (19:06; the user's request through banjo-nx's session): its row
+  `renut_late_input_gpu` is gone, so the key keeps its code default (off; it stays for tests, with its margin key).
+  banjo-nx's console (package 36q): in a GPU-bound scene (33.4 ms of GPU work a frame) 24.3 pictures a second with it
+  against 29.6-29.9 without; the controller read was held back 29 ms a frame instead of 8-11 (the GPU queue's part
+  feeds late input's own slack and the two ratchet up), so the game thread started frames too late and the GPU sat
+  idle about 20 % of the time; nothing measurable at the 30 fps cap. Plain late input, display sync and eager kicks
+  stay on. Ryujinx (`nogpuq_1907`): no "GPU queue" part in the [latency] line, frames right.
+- **futari-nx's deferred chain: Peggle's sprite draws join the delta chain** (14:36; asked through futari-nx's
+  session for the user; the user then had sa2-nx take it too, and it did). `backend/queued.cpp`, key
+  `futari_renut_deferred_chain` (row `renut_deferred_chain`, CPU, on): `QueueDeferredDraw` makes a Begin*Vertices
+  draw that will be queued (scratch) a `CaptureDelta` under `g_delta.mutex` (a stale slot of the device, none
+  expected, is dropped and the chain rebases), and `FlushDeferredVertices` queues it under the chain's lock taken
+  before the deferred map's. Safe because every hook, the Swap too, flushes its device's deferred draw before it
+  captures anything else, so queue order stays capture order. PC verify run (both sa2-nx verify keys): "0
+  Begin*Vertices draws as whole copies", 11,050 draws a 10 s window at 540 bytes a draw (13,088 before), 0 of about
+  11,000 a window differ. Ryujinx (`defchain_1437`, `defchain_true_1442`): every draw a delta, 546-688 bytes a
+  draw in play, frames right. Ryujinx timings of an A/B with the key off (`defchain_false_1440`) were all host load
+  (7.9-20.7 pictures a second off, 10.5-26.6 on): no ranking from them.
+  Caveat (16:56, futari-nx's message, found by banjo-nx, whose copy hung in 4 of 8 emulator runs before it turned it
+  off): the delta chain is one for every Direct3D device, and a deferred draw is made at Begin but queued at the
+  device's next hook, so a draw on another device in between moves the chain's base under it. Peggle 2 has one device
+  ("Guest D3D device (type 1) created" once a run, PC and Switch), so it was never exposed; futari-nx's guard is taken
+  anyway (`queued.cpp`: `DeltaChain::made` / `multi_device`, `DrawCapture::chain_mark`; at a second device's draw
+  Begin*Vertices go back to whole copies, and a pending delta whose base moved is taken whole at the flush, counted in
+  the "[renut] device snapshots" line). PC verify after it: 0 of about 11,000 a window differ, no fallback; Ryujinx
+  (`defguard_1658`): one device, every draw a delta, frames right. Not passed to sa2-nx: its runs have one device
+  too (futari-nx asked for it only if sa2-nx had more).
+- **Not done**: a console run (the user's); store cards (the back-off instead); the automatic front buffer (Peggle
+  swaps its own textures; only a scaler helper reads the automatic one, with a fallback); an offline DKSH build (the
+  NRO's own cache from the emulator ships instead: the same uam, in the NRO).
+
+Credit: reNut by masterspike52; banjo-nx (its Renut port, deko3d back end, shader generator, Ryujinx fork and
+FAQ); the Futari session's notes (early alpha names, vblank pacing).

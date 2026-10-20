@@ -8,6 +8,7 @@
 // definition here wins for every caller (direct, and indirect through the function table), and __imp__ is still the
 // original.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -16,11 +17,20 @@
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
+#include <rex/platform.h>
 
 #include "peggle2_capture.h"
 #include "peggle2_pc_profiler.h"
 #if PEGGLE2_NATIVE_RENDERER
 #include "me/me_native_system.h"
+#endif
+#if PEGGLE2_RENUT_RENDERER
+#include <thread>
+
+#include "renut_engine/display_sync.h"  // 2026-10-20: banjo_display_sync (PaceRenutSwap)
+#include "renut_engine/gpu/banjo_renut_select.h"
+#include "renut_engine/gpu/banjo_shared_hooks.h"
+#include "me/peggle2_render_mode.h"
 #endif
 
 // peggle2_fps = 60 (docs/peggle2-notes.md, "60 frames a second").
@@ -32,10 +42,11 @@
 // gets: one for each 1/60 s that passed since the last frame, never fewer than one or more than the game's own two.
 // So a frame that took one vblank gets one update, a frame that took two gets two (as on the Xbox 360), and the
 // game's speed is the same at 60, at 30 and at anything between; below 30 it slows down as the Xbox 360 game does.
-REXCVAR_DEFINE_INT32(peggle2_fps, 30, "Peggle2",
-                     "Frames a second the game presents: 30 (the Xbox 360 game: a frame every second vblank, two "
-                     "logic updates per frame) or 60 (every vblank, one logic update per 1/60 s that passed: the "
-                     "same game speed, twice the pictures)");
+// 2026-10-20 (the user): 60 by default in every build (the deko3d renderer leaves the room); 30 was the default before.
+REXCVAR_DEFINE_INT32(peggle2_fps, 60, "Peggle2",
+                     "Frames a second the game presents: 60 (every vblank, one logic update per 1/60 s that passed: "
+                     "the default) or 30 (the Xbox 360 game: a frame every second vblank, two logic updates per "
+                     "frame). The game speed is the same either way");
 
 namespace {
 
@@ -85,6 +96,80 @@ extern "C" int peggle2_fps_updates(void) {
 REXCVAR_DEFINE_INT32(peggle2_diag_swap_stack, 0, "Peggle2",
                      "PC diagnostic: log the host call stack (the game's call chain) of this swap; 0 = off");
 
+#if PEGGLE2_RENUT_RENDERER
+REXCVAR_DEFINE_BOOL(peggle2_renut_swap_pacing, true, "Peggle2",
+                    "Renut's renderer: the Swap waits for the presentation interval the game set (60 Hz vblanks), as "
+                    "the console's does; false = frames as fast as they come (timing tests)");
+
+namespace {
+
+// Renut's renderer (peggle2_renderer = "renut") presents without the console's vertical blank, and its Swap does not
+// wait for one: the game would run as fast as the host allows (600-1,200 frames a second on the PC with a minimised
+// window). The console's Swap waits for the flip, every 'interval' vblanks of 60 Hz (the device word at +14000: the
+// game sets 2, peggle2_fps = 60 makes it 1). So this waits for the previous release plus the interval; a frame that is
+// already late goes at once (no catching up), as a late flip does.
+void PaceRenutSwap(uint32_t interval) {
+  using Clock = std::chrono::steady_clock;
+  static Clock::time_point previous{};
+  if (!REXCVAR_GET(peggle2_renut_swap_pacing) || interval == 0) return;
+  const auto frame = std::chrono::nanoseconds(16'666'667LL * std::min<uint32_t>(interval, 4));
+  const auto now = Clock::now();
+  // 2026-10-20 (banjo-nx's banjo_display_sync, as its frame limiter does it): with the display's refresh known (the
+  // Switch, the display's vsync event), the release is a refresh plus the measured phase; a late frame goes at once.
+  // Otherwise (the key off, the PC, the refresh not known yet) the timer below.
+  banjo::display_sync::Start();
+  {
+    static uint64_t previous_release = 0;
+    const auto to_ns = [](Clock::time_point t) {
+      return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(t.time_since_epoch()).count());
+    };
+    bool anchored = false;
+    const uint64_t release = banjo::display_sync::NextRelease(to_ns(now), previous_release, uint64_t(frame.count()),
+                                                              &anchored);
+    if (release) {
+      previous_release = release;
+      const Clock::time_point at{std::chrono::duration_cast<Clock::duration>(std::chrono::nanoseconds(release))};
+      for (;;) {
+        const auto t = Clock::now();
+        if (t >= at) break;
+        if (at - t > std::chrono::microseconds(400))
+          std::this_thread::sleep_for(at - t - std::chrono::microseconds(400));
+        else
+          std::this_thread::yield();
+      }
+      banjo::display_sync::NoteRelease(release, anchored);
+      previous = std::max(at, now);
+      return;
+    }
+    previous_release = 0;
+  }
+  const auto due = previous + frame;
+  if (previous == Clock::time_point{} || due <= now) {
+    previous = now;
+    return;
+  }
+  // The last part is yielded away instead of slept: Windows' sleeps overshoot by up to ~1 ms; Horizon's
+  // svcSleepThread is precise, so the console spins only the last 0.4 ms (banjo-nx's frame limiter's tail).
+#if REX_PLATFORM_SWITCH
+  constexpr auto kTail = std::chrono::microseconds(400);
+#else
+  constexpr auto kTail = std::chrono::microseconds(1500);
+#endif
+  for (;;) {
+    const auto t = Clock::now();
+    if (t >= due) break;
+    const auto left = due - t;
+    if (left > kTail)
+      std::this_thread::sleep_for(left - kTail);
+    else
+      std::this_thread::yield();
+  }
+  previous = due;
+}
+
+}  // namespace
+#endif
+
 extern "C" REX_FUNC(__imp__sub_8261FE50);
 REX_HOOK_RAW(sub_8261FE50) {  // D3DDevice_Swap
   if (const int32_t at = REXCVAR_GET(peggle2_diag_swap_stack);
@@ -98,6 +183,17 @@ REX_HOOK_RAW(sub_8261FE50) {  // D3DDevice_Swap
     const uint8_t two[4] = {0, 0, 0, 2}, one[4] = {0, 0, 0, 1};
     if (!std::memcmp(interval, two, 4)) std::memcpy(interval, one, 4);
   }
+#if PEGGLE2_RENUT_RENDERER
+  if (::banjo::renut_gpu::Active()) {
+    uint8_t interval_bytes[4];
+    std::memcpy(interval_bytes, base + ctx.r3.u32 + 14000, 4);
+    renut_native_sub_8261FE50(ctx, base);  // Renut's Swap (presents)
+    const uint64_t frames = g_peggle2_game_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+    PaceRenutSwap(interval_bytes[3]);
+    peggle2::render::OnPresented(frames);  // PC: the docked / handheld test toggles (the native ring calls it there)
+    return;
+  }
+#endif
   __imp__sub_8261FE50(ctx, base);
   g_peggle2_game_frames.fetch_add(1, std::memory_order_relaxed);
 #if PEGGLE2_NATIVE_RENDERER

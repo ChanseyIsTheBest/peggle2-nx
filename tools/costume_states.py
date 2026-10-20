@@ -20,7 +20,9 @@ unlocked states only, at 25, 26, 27 and 28, 29, 30. Three functions change:
    silhouette of a master that is locked).
 
   python tools/costume_states.py [--gen app/generated/default] [--check]
-Idempotent. Last in tools/post_codegen.py (it reads the text the other steps leave).
+Idempotent. In tools/post_codegen.py right after leaf_locals.py (it reads the text the steps up to there leave)
+and before banjo-nx's analyses: they take a function with its `// peggle2-nx:` line for opaque
+(tools/leaf_dead_stores.py, OPAQUE_MARK), so this step must write that line in every function it changes.
 """
 import glob
 import os

@@ -183,6 +183,11 @@ struct FPSCRRegister {
   }
 
   inline void storeFromGuest(uint32_t value) noexcept {
+    // banjo-nx (2026-10-14): which rounding modes the game selects (PC census; nothing on the Switch).
+    REX_SYS_CENSUS((value & kRoundMask) == kRoundNearest  ? rex::syscount::kCensusRoundNearest
+                   : (value & kRoundMask) == kRoundTowardZero ? rex::syscount::kCensusRoundZero
+                                                              : rex::syscount::kCensusRoundUpDown,
+                   1);
     csr &= ~RoundMaskVal;
     csr |= Platform::GuestToHost[value & kRoundMask];
     setcsr(csr);

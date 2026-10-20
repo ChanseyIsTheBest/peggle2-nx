@@ -39,6 +39,10 @@ REXCVAR_DEFINE_BOOL(peggle2_video_half, true, "Peggle2",
 
 std::atomic<uint64_t> g_peggle2_game_frames{0};
 
+REXCVAR_DEFINE_INT32(peggle2_shots_every_s, 0, "Peggle2",
+                     "Test: one frame every N seconds into shots/ next to the executable (raw RGBA; 0 = off)")
+    .range(0, 3600);
+
 namespace peggle2::capture {
 namespace {
 
@@ -52,7 +56,7 @@ bool StopRequested() {
   return g_stop;
 }
 
-void Record(std::function<rex::ui::Presenter*()> get_presenter, int start_s, int from_frame, int frame_count) {
+void Record(Grabber grab, int start_s, int from_frame, int frame_count) {
   if (from_frame > 0) {
     while (g_peggle2_game_frames.load(std::memory_order_relaxed) + 1 < uint64_t(from_frame)) {
       if (StopRequested()) {
@@ -98,9 +102,8 @@ void Record(std::function<rex::ui::Presenter*()> get_presenter, int start_s, int
     }
     last = now;
     std::this_thread::sleep_for(std::chrono::milliseconds(4));
-    rex::ui::Presenter* presenter = get_presenter ? get_presenter() : nullptr;
     rex::ui::RawImage image;
-    if (!presenter || !presenter->CaptureGuestOutput(image) || !image.width || !image.height ||
+    if (!grab || !grab(image) || !image.width || !image.height ||
         (width && (image.width != width || image.height != height))) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
       continue;
@@ -141,17 +144,57 @@ void Record(std::function<rex::ui::Presenter*()> get_presenter, int start_s, int
               rex::path_to_utf8(folder / (name + ".rgba")));
 }
 
+// peggle2_shots_every_s (2026-10-19, for the emulator and console runs of Renut's renderer): one frame every N seconds
+// as <exe folder>/shots/shot_<seconds>s_<width>x<height>.rgba (raw RGBA; tools turn them into PNGs).
+std::thread g_shots;
+
+void Shots(Grabber grab, int every_s) {
+  const auto folder = rex::filesystem::GetExecutableFolder() / "shots";
+  std::error_code ec;
+  std::filesystem::create_directories(folder, ec);
+  for (int n = 1; n <= 200; ++n) {
+    {
+      std::unique_lock lock(g_mutex);
+      if (g_cv.wait_for(lock, std::chrono::seconds(every_s), [] { return g_stop; })) return;
+    }
+    rex::ui::RawImage image;
+    if (!grab || !grab(image) || !image.width || !image.height) {
+      REXLOG_WARN("[capture] shot at {} s: no image", n * every_s);
+      continue;
+    }
+    const auto path = folder / ("shot_" + std::to_string(n * every_s) + "s_" + std::to_string(image.width) + "x" +
+                                std::to_string(image.height) + ".rgba");
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    for (uint32_t y = 0; y < image.height; ++y) {
+      out.write(reinterpret_cast<const char*>(image.data.data() + size_t(y) * image.stride),
+                std::streamsize(size_t(image.width) * 4));
+    }
+    REXLOG_INFO("[capture] shot at {} s ({} game frames) -> {}", n * every_s,
+                g_peggle2_game_frames.load(std::memory_order_relaxed), rex::path_to_utf8(path));
+  }
+}
+
 }  // namespace
 
 void Start(std::function<rex::ui::Presenter*()> get_presenter) {
-  if ((REXCVAR_GET(peggle2_video_s) <= 0 && REXCVAR_GET(peggle2_video_from_frame) <= 0) || g_thread.joinable()) {
-    return;
-  }
+  StartGrabber([get_presenter = std::move(get_presenter)](rex::ui::RawImage& image) {
+    rex::ui::Presenter* presenter = get_presenter ? get_presenter() : nullptr;
+    return presenter && presenter->CaptureGuestOutput(image);
+  });
+}
+
+void StartGrabber(Grabber grab) {
   {
     std::lock_guard lock(g_mutex);
     g_stop = false;
   }
-  g_thread = std::thread(Record, std::move(get_presenter), int(REXCVAR_GET(peggle2_video_s)),
+  if (REXCVAR_GET(peggle2_shots_every_s) > 0 && !g_shots.joinable()) {
+    g_shots = std::thread(Shots, grab, int(REXCVAR_GET(peggle2_shots_every_s)));
+  }
+  if ((REXCVAR_GET(peggle2_video_s) <= 0 && REXCVAR_GET(peggle2_video_from_frame) <= 0) || g_thread.joinable()) {
+    return;
+  }
+  g_thread = std::thread(Record, std::move(grab), int(REXCVAR_GET(peggle2_video_s)),
                          int(REXCVAR_GET(peggle2_video_from_frame)), int(REXCVAR_GET(peggle2_video_frames)));
 }
 
@@ -163,6 +206,9 @@ void Stop() {
   g_cv.notify_all();
   if (g_thread.joinable()) {
     g_thread.join();
+  }
+  if (g_shots.joinable()) {
+    g_shots.join();
   }
 }
 

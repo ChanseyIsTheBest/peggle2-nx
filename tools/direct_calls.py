@@ -56,6 +56,14 @@ def hooked():
                 continue
             if path.endswith(CODE_SUFFIXES):
                 text = CodeOnly(text)
+            elif path.endswith('.toml') or os.path.basename(path) == 'CMakeLists.txt':
+                # From banjo-nx (2026-10-19, its CPU proposal 7): a # comment names addresses for the reader, not hooks.
+                text = re.sub(r'(?m)(^|[ \t])#[^\n]*', ' ', text)
+            if os.path.basename(path) == 'perf_overrides.toml':
+                # non_argument_as_local's keep list names functions that keep r11/r12 in ctx (the stack probe, the
+                # EH frame call and its funclets), not hooks: the stack probe's 2,000-odd callers call it weakly
+                # otherwise (not inlinable). lr_keep_callees stays counted (its functions are hooked anyway).
+                text = re.sub(r'non_argument_as_local_keep\s*=\s*\[.*?\]', ' ', text, flags=re.S)
             for m in re.findall(r'(?<![0-9A-Fa-f])(82[0-9A-Fa-f]{6})(?![0-9A-Fa-f])', text):
                 names.add('sub_' + m.upper())
     return names
@@ -68,7 +76,26 @@ def hooked():
 CODE_SUFFIXES = ('.cpp', '.cc', '.c', '.h', '.hpp', '.inc')
 
 
+def DropIfZero(text):
+    # peggle2-nx (2026-10-19): code under #if 0 is not compiled (Renut's hooks of N&B functions Peggle 2 does not link).
+    out, depth = [], 0
+    for line in text.split('\n'):
+        s = line.strip()
+        if depth:
+            if re.match(r'#\s*if', s):
+                depth += 1
+            elif re.match(r'#\s*endif', s):
+                depth -= 1
+            continue
+        if re.match(r'#\s*if\s+0\b', s):
+            depth = 1
+            continue
+        out.append(line)
+    return '\n'.join(out)
+
+
 def CodeOnly(text):
+    text = DropIfZero(text)
     text = re.sub(r'/\*.*?\*/', ' ', text, flags=re.S)
     text = re.sub(r'//[^\n]*', ' ', text)
     return re.sub(r'__imp__sub_[0-9A-Fa-f]{8}', ' ', text)

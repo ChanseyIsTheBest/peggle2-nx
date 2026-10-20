@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <sched.h>
 
+#include <cstring>  // sa2-nx (2026-10-20): RexSwitchSetThreadMaskOf
 #include <mutex>
 #include <unordered_map>
 
@@ -329,6 +330,50 @@ bool RexSwitchPinCurrentThreadToCore(int core) {
  * it is read on every loop iteration and counted each time it changes. There is no syscall to ask
  * it about another thread, so each thread has to look at itself.
  */
+// sa2-nx (2026-10-20): RexSetGuestThreadCoreLayout (system/xthread.cpp).
+bool RexSwitchSetThreadMaskOf(void* native_handle, int preferred, unsigned long long mask) {
+  pthread_t thread;
+  static_assert(sizeof(thread) == sizeof(native_handle));
+  std::memcpy(&thread, &native_handle, sizeof(thread));
+  const RexSwitchHandle h = RexSwitchHandleFor(thread);
+  const u64 m = u64(mask) & 0x7;
+  if (h == REX_SWITCH_INVALID_HANDLE || m == 0 || preferred < 0 || !(m & (u64(1) << preferred))) return false;
+  return R_SUCCEEDED(svcSetThreadCoreMask(h, preferred, m));
+}
+
+bool RexSwitchSetCurrentThreadMask(int preferred, unsigned long long mask) {
+  Thread* yo = threadGetSelf();
+  Handle h = (yo != nullptr) ? yo->handle : CUR_THREAD_HANDLE;
+  s32 current_preferred = 0;
+  u64 current = 0;
+  if (R_FAILED(svcGetThreadCoreMask(&current_preferred, &current, h))) {
+    if (h == CUR_THREAD_HANDLE ||
+        R_FAILED(svcGetThreadCoreMask(&current_preferred, &current, CUR_THREAD_HANDLE))) {
+      return false;
+    }
+    h = CUR_THREAD_HANDLE;
+  }
+  const u64 m = u64(mask) & 0x7;  // the process's three cores
+  if (m == 0 || preferred < 0 || !(m & (u64(1) << preferred))) {
+    return false;
+  }
+  return R_SUCCEEDED(svcSetThreadCoreMask(h, preferred, m));
+}
+
+bool RexSwitchUnpinCurrentThread(int core) {
+  u64 process_mask = 0;
+  if (R_FAILED(svcGetInfo(&process_mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) || process_mask == 0) {
+    return false;
+  }
+  Thread* yo = threadGetSelf();
+  const Handle h = (yo != nullptr) ? yo->handle : CUR_THREAD_HANDLE;
+  const s32 preferred = (core >= 0 && (process_mask & (u64(1) << core)) != 0) ? s32(core) : s32(-1);
+  if (R_SUCCEEDED(svcSetThreadCoreMask(h, preferred, process_mask))) {
+    return true;
+  }
+  return h != CUR_THREAD_HANDLE && R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, preferred, process_mask));
+}
+
 int RexSwitchCurrentCore(void) { return int(svcGetCurrentProcessorNumber()); }
 
 }  // extern "C"

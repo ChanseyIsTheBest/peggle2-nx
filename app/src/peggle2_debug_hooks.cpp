@@ -456,3 +456,38 @@ PEGGLE2_ALLOCATOR_ENTRY(sub_825EE8C0)  // free(ptr)
 PEGGLE2_ALLOCATOR_ENTRY(sub_823188B0)  // XMemAlloc(size, attributes)
 PEGGLE2_ALLOCATOR_ENTRY(sub_823189E8)  // XMemFree(ptr, attributes)
 #undef PEGGLE2_ALLOCATOR_ENTRY
+
+// Local multiplayer, 2026-10-20 (the user's console run: player 2's controller did nothing once a duel began; on the
+// PC player 2's turns followed player 1's controller). The four controller objects of the input manager (sub_8245F778
+// updates them; sub_8245F948 polls one: user index at +4, the profile it is bound to at +448, looked up by the user's
+// name, XamUserGetName). Every 10 s with peggle2_diag_controllers: each controller's user, profile and flags.
+REXCVAR_DEFINE_BOOL(peggle2_diag_controllers, false, "Peggle2",
+                    "Diagnostic: every 10 s the input manager's four controllers (user index, the profile each is bound "
+                    "to, its flags). A signed-in controller without a profile is not a player in a duel");
+
+extern "C" REX_FUNC(__imp__sub_8245F778);
+REX_HOOK_RAW(sub_8245F778) {
+  const uint32_t manager = ctx.r3.u32;
+  __imp__sub_8245F778(ctx, base);
+  if (!REXCVAR_GET(peggle2_diag_controllers)) return;
+  static std::atomic<int64_t> last{0};
+  const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch()).count();
+  int64_t prev = last.load(std::memory_order_relaxed);
+  if (now - prev < 10000 || !last.compare_exchange_strong(prev, now)) return;
+  std::string line;
+  for (uint32_t i = 0; i < 4; ++i) {
+    const uint32_t c = Load32(base, manager + 8 + 4 * i);
+    if (!c) {
+      line += fmt::format(" [{}: none]", i);
+      continue;
+    }
+    const uint32_t profile = Load32(base, c + 448);
+    std::string words;
+    for (uint32_t w = 0; w < 6 && profile; ++w) words += fmt::format(" {:08X}", Load32(base, profile + 4 * w));
+    line += fmt::format(" [{}: obj {:08X} user {} profile {:08X}{} flags {}/{}/{}]", i, c, int32_t(Load32(base, c + 4)),
+                        profile, words, base[c + 12], base[c + 584], base[c + 585]);
+  }
+  REXLOG_INFO("[controllers] manager {:08X}:{}", manager, line);
+}
+

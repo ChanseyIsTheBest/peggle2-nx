@@ -145,10 +145,15 @@ void emit_prefetch(BuilderContext& ctx, int write) {
   if (!ctx.config().dcbtPrefetch) {
     return;
   }
+  // dcbt / dcbtst decode as {CT, RA, RB} (thirdparty/disasm/ppc-dis.c), unlike dcbz's {RA, RB}: the address is
+  // (RA|0) + RB. banjo-nx (2026-10-16; ported to peggle2-nx 2026-10-19): this read operands 0 and 1, so every
+  // prefetch went to RA alone (or r0) instead of RA + RB: "dcbt r31,r6" prefetched r31, "dcbt r0,r8" r0 (often a
+  // small number: the null page). A prefetch changes no value either way; 1.85 % of Banjo's console game-thread
+  // samples sat on the wrong ones.
   ctx.print("\tREX_PREFETCH(");
-  if (ctx.insn.operands[0] != 0)
-    ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[0]));
-  ctx.println("{}.u32, {});", ctx.r(ctx.insn.operands[1]), write);
+  if (ctx.insn.operands[1] != 0)
+    ctx.print("{}.u32 + ", ctx.r(ctx.insn.operands[1]));
+  ctx.println("{}.u32, {});", ctx.r(ctx.insn.operands[2]), write);
 }
 }  // namespace
 

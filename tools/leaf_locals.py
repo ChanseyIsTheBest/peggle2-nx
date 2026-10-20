@@ -35,6 +35,24 @@ FUNC = re.compile(r'^DEFINE_REX_FUNC\((\w+)\) \{$')
 REG = re.compile(r'\bctx\.(r\d+|f\d+|v\d+|cr\d|ctr|xer|reserved)\b')
 CALL = re.compile(r'\(ctx, base[,)]|REX_CALL_INDIRECT_|ppc_trap\(|\bctx\s*[,)]')
 RETURN = re.compile(r'\breturn;')
+# From banjo-nx (2026-10-16, marathon-nx's proposal 3; peggle2-nx 2026-10-19): functions whose A57 code is cheaper
+# without these locals, measured on the compiled code by tools/locals_choice.py (app/config/locals_optout.txt,
+# "<loop|leaf> <name>" per line). They keep their ctx registers; a change of the list needs a fresh codegen (the tools
+# never undo a function they already converted). app/config, not app/: the analyses that read every address the
+# port's sources and app/*.txt name (tools/leaf_dead_stores.py) would take the list's functions for hooked ones.
+OPTOUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app', 'config', 'locals_optout.txt')
+
+
+def read_optout(kind, path=OPTOUT):
+    names = set()
+    if os.path.isfile(path):
+        for line in open(path, encoding='utf-8'):
+            parts = line.split('#', 1)[0].split()
+            if len(parts) == 2 and parts[0] == kind:
+                names.add(parts[1])
+    return names
+
+
 MARKER = '// rexglue ports: registers as locals in leaf functions with loops (tools/leaf_locals.py)'
 MACROS = MARKER + '''
 // Every register type is a by-value local, vector registers included. 2026-10-13: vector registers were made
@@ -78,6 +96,8 @@ def main():
     if not files or len(pchs) != 1:
         sys.exit('ERROR (post-codegen patch): leaf_locals: no *_recomp.N.cpp or no single *_pch.h in %s' % a.gen)
     done = already = skipped = registers = read_only = changed = 0
+    optout = read_optout('leaf')
+    opted_out = 0
     for f in files:
         path = os.path.join(a.gen, f)
         lines = open(path, encoding='utf-8').read().split('\n')
@@ -87,7 +107,8 @@ def main():
         while i < len(lines):
             line = lines[i]
             out.append(line)
-            if not FUNC.match(line):
+            func = FUNC.match(line)
+            if not func:
                 i += 1
                 continue
             j = i + 1
@@ -97,6 +118,10 @@ def main():
             code = [l for l in body if not l.lstrip().startswith('//')]
             text = '\n'.join(code)
             i = j
+            if func.group(1) in optout:
+                opted_out += 1
+                out.extend(body)
+                continue
             if 'REX_LEAF_LOCAL(' in text:
                 already += 1
                 out.extend(body)
@@ -160,9 +185,9 @@ def main():
         if not a.check:
             open(pch, 'w', encoding='utf-8', newline='\n').write(text)
     print('leaf_locals%s: %d leaf functions%s with %d registers as locals (%d of them only read: not written back), '
-          '%d left alone, %d already done; %d files changed' %
+          '%d left alone, %d already done, %d on the opt-out list; %d files changed' %
           (' (check only)' if a.check else '', done, '' if a.all_leaves else ' with loops', registers, read_only,
-           skipped, already, changed))
+           skipped, already, opted_out, changed))
 
 
 if __name__ == '__main__':

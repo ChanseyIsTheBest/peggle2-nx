@@ -14,6 +14,7 @@
 #include <cmath>
 
 #include <rex/dbg.h>
+#include <rex/frame_latency.h>  // banjo-nx (2026-10-19); peggle2-nx: wired in 2026-10-20
 #include <rex/input/device_assignment.h>
 #include <rex/input/flags.h>
 #include <rex/input/input_driver.h>
@@ -252,6 +253,11 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
 
 X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   SCOPE_profile_cpu_f("hid");
+  // banjo-nx (2026-10-19, input latency): the late input delay (first read after a Swap; Renut's banjo_late_input
+  // installs it, nothing otherwise) and the latency probe. peggle2-nx (2026-10-20): the SDK had both functions but
+  // nothing called them, so the delay never applied and the [latency] line said "no frame presented".
+  rex::latency::BeforeInputRead();
+  rex::latency::NoteInputRead();
   if (!assignment_) {
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }

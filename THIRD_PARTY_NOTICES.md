@@ -19,6 +19,18 @@ The Horizon (Switch) layer added to `sdk/` is under the SDK's BSD-3-Clause licen
 `mesa/` under the licenses of those projects (MIT), so they can be reused by other ports. The rest of this repository
 (`app/`, `tools/`, `tests/`, `installer/`, `docs/`) is GPL-3.0 (`LICENSE`).
 
+## The renderer of 1.0.1 (`app/src/renut_engine`, `app/thirdparty`)
+
+| Project | Used for | License |
+|---|---|---|
+| [reNut](https://github.com/masterspike52/reNut) by masterspike52, in banjo-nx's Switch port of it | `app/src/renut_engine`: Renut's Direct3D-level renderer (the game's Direct3D calls drawn directly), its shader translator front end and frame statistics | reuse in this port permitted by its author; credit to reNut and masterspike52 |
+| [plume](https://github.com/renderbag/plume) by renderbag and contributors, with banjo-nx's deko3d back end | `app/thirdparty/plume`: the rendering layer Renut draws through (deko3d on the Switch, Vulkan / D3D12 on the PC) | MIT (`app/thirdparty/plume/LICENSE`) |
+| [uam](https://github.com/devkitPro/uam) by fincs, with code imported from Mesa | `app/thirdparty/uam`: the deko3d shader compiler, built into the NRO and for the PC | zlib (its own code) and MIT (the code imported from Mesa); `app/thirdparty/uam/LICENSE` |
+| [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) by hedge-dev and contributors, in Renut's version | `app/thirdparty/reblue-XenosRecomp`: Renut's shader translator (run on the PC; the installer runs it in WebAssembly) | MIT (`app/thirdparty/reblue-XenosRecomp/LICENSE.md`) |
+| [Dear ImGui](https://github.com/ocornut/imgui) by Omar Cornut | `app/thirdparty/imgui`: the overlay Renut draws | MIT (`app/thirdparty/imgui/LICENSE.txt`) |
+| [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross) | SPIR-V to GLSL for the deko3d shaders (built for the PC by `tools/deko3d_build_tools.sh`; the installer runs it in WebAssembly) | Apache-2.0 |
+| [deko3d](https://github.com/devkitPro/deko3d) by fincs (devkitPro) | the Switch graphics API the NRO draws with | zlib |
+
 ## Libraries
 
 Libraries used by the SDK, the NRO and the code generator. They are not stored in this repository except for the

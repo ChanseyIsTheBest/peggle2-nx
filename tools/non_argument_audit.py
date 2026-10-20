@@ -259,7 +259,9 @@ def main():
     proven = set()
     for a in sys.argv[2:]:
         if a.startswith('--noreturn='):
-            noreturn |= {'sub_' + x.upper() for x in a.split('=', 1)[1].split(',') if x}
+            # banjo-nx: an address (sub_X) or a function's own name
+            noreturn |= {('sub_' + x.upper()) if re.fullmatch(r'[0-9A-Fa-f]{8}', x) else x
+                         for x in a.split('=', 1)[1].split(',') if x}
         if a.startswith('--proven='):
             # functions whose v32-v63 entry reads are proven not to matter (tools/vec_shiftout.py): not passed on
             # to their callers
@@ -277,7 +279,9 @@ def main():
                 return True
             if i in fn.calls and any(x in noreturn for x in fn.calls[i][0]):
                 continue
-            if i == len(fn.raw) - 1 and not fn.succ[i] and not s.startswith(('goto ', '__builtin_trap', 'REX_FATAL')):
+            # banjo-nx: a function whose last statement is the direct ppc_longjmp does not fall off its end
+            if (i == len(fn.raw) - 1 and not fn.succ[i] and not s.startswith(('goto ', '__builtin_trap', 'REX_FATAL'))
+                    and 'ppc_longjmp(' not in s):
                 return True
             for j in fn.succ[i]:
                 if j not in seen:

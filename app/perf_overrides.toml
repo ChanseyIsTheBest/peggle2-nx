@@ -109,6 +109,22 @@ fp_mode_lookahead_past_branch = false
 fcti_inline = true
 fp_copy_pairs = true
 div_inline = true
+# banjo-nx's codegen round (ported 2026-10-19; docs/peggle2-notes.md, "banjo-nx's codegen round"):
+#   - rotate_word_shifts: rlwinm / rlwimi whose mask does not wrap as the shift, extract or 32-bit rotate the mask
+#     makes of them (lsl / lsr / ubfiz / ubfx on the A57: one instruction where the 64-bit rotate of the duplicated
+#     word took two or three). 8,171 of Peggle's functions change; every rlwinm / rlwimi statement the generator
+#     writes was checked against the 64-bit definition (sdk/tests/rotate_word_test.cpp, and 54,370 sites of this
+#     tree: 0 differences);
+#   - fp_copy_forwarding: fp_copy_pairs' bit copies (no flush-mode switch) also where other instructions stand between
+#     the lfs and its stfs, and through in-place fneg / fabs / fnabs (none in Peggle): 5,328 copy-form stores, 9.6 %
+#     fewer flush-mode switch statements (each an msr fpcr on the A57);
+#   - setjmp_save_locals: a CORRECTION (sa2-nx's, always on in banjo-nx): at each of the 12 setjmp sites the
+#     non-volatile locals go into the jump buffer and come back after a longjmp; before, a local the function changed
+#     between setjmp and longjmp (libpng's error path) came back with an undefined value.
+# The generator's dcbt operand fix is in too (RA|0 + RB); dcbt_prefetch stays off (no measurement on the A57).
+rotate_word_shifts = true
+fp_copy_forwarding = true
+setjmp_save_locals = true
 # Left off: args_in_registers.
 #
 # share_registers: split pieces and funclets that read r14-r31, cr, ctr or xer before writing them must share their

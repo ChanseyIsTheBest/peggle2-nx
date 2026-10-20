@@ -24,7 +24,13 @@ $tests = @(
     @{ name = 'vmx_small_helpers_test'; flags = @('-O2', '-std=c++23', '-march=x86-64-v2'); runs = @(, @()) },
     @{ name = 'neon_shuffles_test'; flags = @('-O2', '-std=c++23', '-march=x86-64-v2'); runs = @(, @()) },
     @{ name = 'fcti_copy_test'; flags = @('-O2', '-std=c++23', '-ffp-contract=off'); runs = @(, @()) },
-    @{ name = 'float_loads_test'; flags = @('-O2', '-std=c++23', '-march=x86-64-v2'); runs = @(, @()) }
+    @{ name = 'float_loads_test'; flags = @('-O2', '-std=c++23', '-march=x86-64-v2'); runs = @(, @()) },
+    # banjo-nx's codegen round (2026-10-19): the helpers of tools/vec_unaligned_stores.py, tools/inline_memcalls.py,
+    # tools/fp_sign_ops.py and tools/single_floats.py against the forms they replace.
+    @{ name = 'vec_unaligned_test'; flags = @('-O2', '-std=c++23', '-ffp-contract=off', '-march=x86-64-v2'); runs = @(, @()) },
+    @{ name = 'memcalls_test'; flags = @('-O2', '-std=c++23', '-ffp-contract=off', '-march=x86-64-v2'); runs = @(, @()) },
+    @{ name = 'fp_sign_ops_test'; flags = @('-O2', '-std=c++23', '-ffp-contract=off', '-march=x86-64-v2'); runs = @(, @()) },
+    @{ name = 'single_floats_test'; flags = @('-O2', '-std=c++23', '-ffp-contract=off', '-march=x86-64-v2'); runs = @(, @()) }
 )
 $failed = 0
 foreach ($t in $tests) {

@@ -1,9 +1,9 @@
 # Peggle 2 for the Nintendo Switch: your settings. The game writes this file when there is none; delete it to get
 # the defaults back. Everything else is built into peggle2.nro.
 
-# Pictures a second: 30 = as the Xbox 360 game, 60 = a picture every screen refresh. The game runs at the same speed
+# Pictures a second: 60 = a picture every screen refresh, 30 = as the Xbox 360 game. The game runs at the same speed
 # either way (60 logic steps a second); 60 needs more of the console and is not reached everywhere.
-peggle2_fps = 30
+peggle2_fps = 60
 
 # Language: "en", "de", "fr", "es", "it" or "pt" (Brazilian Portuguese). Empty = English.
 peggle2_language = ""
