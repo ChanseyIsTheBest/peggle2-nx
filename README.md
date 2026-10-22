@@ -129,6 +129,7 @@ as one, so handheld + a Pro Controller makes players 1 and 2. Single Joy-Cons ar
 | `peggle2_language` | `en`, `de`, `fr`, `es`, `it` or `pt` (Brazilian Portuguese); empty = English |
 | `input_xbox_layout` | Face buttons by position (`true`, default) or by letter (`false`) |
 | `input_joycon_sideways` | Single Joy-Cons held sideways, one per player (`true`, default) |
+| `input_joycon_sideways_stick` | With it, a single Joy-Con's stick turned for the sideways grip (`true`, default) |
 | `input_p1_a` ... `input_p4_right` | Each player's buttons: for every Xbox button, the Switch buttons that press it, e.g. `input_p1_a = "B, ZR"` |
 
 </div>

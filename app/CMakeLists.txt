@@ -577,7 +577,7 @@ if(REXGLUE_PLATFORM_SWITCH)
     target_link_options(peggle2 PRIVATE "LINKER:-Map=${CMAKE_BINARY_DIR}/peggle2.map")
     # The homebrew menu's entry: name, author, version and icon (app/icon.jpg, 256x256 JPEG; the user's picture,
     # 2026-10-14).
-    set(PEGGLE2_VERSION "1.0.1" CACHE STRING "NRO display version" FORCE)
+    set(PEGGLE2_VERSION "1.0.2" CACHE STRING "NRO display version" FORCE)
     set(_peggle2_icon "")
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")
         set(_peggle2_icon ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg")
